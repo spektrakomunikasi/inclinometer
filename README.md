@@ -77,7 +77,7 @@ Default:
 ## 8) Cara membuka web dashboard
 1. Hubungkan HP/laptop ke Wi-Fi AP: `SHIP-INCLINOMETER`.
 2. Buka browser ke: `http://192.168.4.1` untuk dashboard telemetry (read-only).
-3. Untuk konfigurasi, buka: `http://192.168.4.1/admin` lalu login Basic Auth (username: `admin`, password: admin token aktif **atau** AP password aktif).
+3. Untuk konfigurasi, buka: `http://192.168.4.1/admin` lalu login Basic Auth (username: `admin`, password: admin token aktif).
 4. Dashboard update realtime (polling JSON) tanpa internet/cloud.
 
 ## 9) Kalibrasi
@@ -96,7 +96,7 @@ Di panel web settings tersedia:
 - Admin token (untuk autentikasi aksi manajemen)
 - New admin token (opsional untuk mengganti token lama)
 - Catatan: perubahan password AP dan token admin valid jika panjang 8-63 karakter.
-- Nilai token admin aktif **tidak ditampilkan kembali** dari API; masukkan token saat ini secara manual pada halaman `/admin`.
+- Nilai token admin aktif **tidak ditampilkan kembali** dari API; setelah login `/admin`, isi field **ADMIN TOKEN** dengan token aktif agar aksi SAVE/CALIBRATE/RESET terotorisasi.
 
 Tombol:
 - **SAVE SETTINGS** -> simpan ke NVS (Preferences)

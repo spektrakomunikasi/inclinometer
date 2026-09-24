@@ -943,8 +943,7 @@ void handleRoot() {
 }
 
 void handleAdmin() {
-  if (!server.authenticate("admin", adminToken.c_str()) &&
-      !server.authenticate("admin", apPassword.c_str())) {
+  if (!server.authenticate("admin", adminToken.c_str())) {
     server.requestAuthentication();
     return;
   }
@@ -1284,15 +1283,18 @@ async function updateData(){
     setGauge(byId('rollMarker'),d.mpu.roll,danger);
     setGauge(byId('pitchMarker'),d.mpu.pitch,danger);
 
-    byId('flags').innerHTML=kv([
-      ['MPU6050', d.mpu.detected?(d.mpu.healthy?'OK':'ERROR'):'NOT FOUND'],
-      ['ADXL345', d.adxl.detected?(d.adxl.healthy?'OK':'ERROR'):'NOT FOUND'],
-      ['TFT', d.system.tftOk?'OK':'ERROR'], ['WiFi', d.wifi.ok?'OK':'ERROR'],
-      ['Sensor Rate', `${d.rates.sensorMs} ms`],
-      ['Filter Rate', `${d.rates.filterMs} ms`],
-      ['TFT Rate', `${d.rates.tftMs} ms`],
-      ['Web Rate', `${d.rates.webMs} ms`]
-    ]);
+    const flagsEl=byId('flags');
+    if(flagsEl){
+      flagsEl.innerHTML=kv([
+        ['MPU6050', d.mpu.detected?(d.mpu.healthy?'OK':'ERROR'):'NOT FOUND'],
+        ['ADXL345', d.adxl.detected?(d.adxl.healthy?'OK':'ERROR'):'NOT FOUND'],
+        ['TFT', d.system.tftOk?'OK':'ERROR'], ['WiFi', d.wifi.ok?'OK':'ERROR'],
+        ['Sensor Rate', `${d.rates.sensorMs} ms`],
+        ['Filter Rate', `${d.rates.filterMs} ms`],
+        ['TFT Rate', `${d.rates.tftMs} ms`],
+        ['Web Rate', `${d.rates.webMs} ms`]
+      ]);
+    }
 
     pollMs=Number(d.rates.webMs)||pollMs;
   }catch(e){byId('stamp').textContent='update failed';}
