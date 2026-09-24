@@ -10,6 +10,7 @@
 #include <Adafruit_Sensor.h>
 #include <Adafruit_ADXL345_U.h>
 #include <esp_system.h>
+#include <stdlib.h>
 
 // =========================
 // Hardware pin configuration
@@ -200,6 +201,35 @@ String fmtf(float v, uint8_t p = 2) {
   return String(v, p);
 }
 
+String jsonEscape(const String &in) {
+  String out;
+  out.reserve(in.length() + 8);
+  for (size_t i = 0; i < in.length(); i++) {
+    char c = in[i];
+    if (c == '\\' || c == '\"') {
+      out += '\\';
+      out += c;
+    } else if (c == '\n') {
+      out += "\\n";
+    } else if (c == '\r') {
+      out += "\\r";
+    } else if (c == '\t') {
+      out += "\\t";
+    } else {
+      out += c;
+    }
+  }
+  return out;
+}
+
+bool tryParseFloat(const String &s, float &out) {
+  if (s.length() == 0) return false;
+  char *endPtr = nullptr;
+  out = strtof(s.c_str(), &endPtr);
+  if (endPtr == s.c_str() || *endPtr != '\0' || !isfinite(out)) return false;
+  return true;
+}
+
 void applyAdxlAxisMap(float inX, float inY, float inZ, float &outX, float &outY, float &outZ) {
   const float src[3] = {inX, inY, inZ};
   int xi = constrain(cfg.adxlAxis.x, 0, 2);
@@ -255,11 +285,20 @@ bool tokenOkApi() {
 bool originAllowed() {
   if (!server.hasHeader("Origin")) return false;
   String origin = server.header("Origin");
-  if (origin.length() == 0) return false;
-  String ipOrigin = String("http://") + WiFi.softAPIP().toString();
-  if (origin == ipOrigin || origin == ipOrigin + "/" || origin == ipOrigin + ":80" || origin == ipOrigin + ":80/") return true;
-  String aliasOrigin = String("http://") + ADMIN_HOST_ALIAS;
-  if (origin == aliasOrigin || origin == aliasOrigin + "/" || origin == aliasOrigin + ":80" || origin == aliasOrigin + ":80/") return true;
+  origin.trim();
+  origin.toLowerCase();
+  if (!origin.startsWith("http://")) return false;
+  String hostPort = origin.substring(7);
+  int slashIdx = hostPort.indexOf('/');
+  if (slashIdx >= 0) hostPort = hostPort.substring(0, slashIdx);
+  if (hostPort.length() == 0) return false;
+
+  String apIp = WiFi.softAPIP().toString();
+  String alias = String(ADMIN_HOST_ALIAS);
+  alias.toLowerCase();
+
+  if (hostPort == apIp || hostPort == apIp + ":80") return true;
+  if (hostPort == alias || hostPort == alias + ":80") return true;
   return false;
 }
 
@@ -881,33 +920,33 @@ String buildDataJson() {
   j = "{";
   j += "\"roll\":" + fmtf(outputRollDeg, 3);
   j += ",\"pitch\":" + fmtf(outputPitchDeg, 3);
-  j += ",\"roll_direction\":\"" + rollDirection(outputRollDeg) + "\"";
-  j += ",\"pitch_direction\":\"" + pitchDirection(outputPitchDeg) + "\"";
+  j += ",\"roll_direction\":\"" + jsonEscape(rollDirection(outputRollDeg)) + "\"";
+  j += ",\"pitch_direction\":\"" + jsonEscape(pitchDirection(outputPitchDeg)) + "\"";
 
   j += ",\"mpu\":{";
   j += "\"ax\":" + fmtf(mpuState.ax, 4) + ",\"ay\":" + fmtf(mpuState.ay, 4) + ",\"az\":" + fmtf(mpuState.az, 4);
   j += ",\"gx\":" + fmtf(mpuState.gx, 4) + ",\"gy\":" + fmtf(mpuState.gy, 4) + ",\"gz\":" + fmtf(mpuState.gz, 4);
   j += ",\"roll\":" + fmtf(mpuState.roll, 3) + ",\"pitch\":" + fmtf(mpuState.pitch, 3);
-  j += ",\"status\":\"" + sensorStatusString(mpuState) + "\"}";
+  j += ",\"status\":\"" + jsonEscape(sensorStatusString(mpuState)) + "\"}";
 
   j += ",\"adxl\":{";
   j += "\"ax\":" + fmtf(adxlState.ax, 4) + ",\"ay\":" + fmtf(adxlState.ay, 4) + ",\"az\":" + fmtf(adxlState.az, 4);
   j += ",\"roll\":" + fmtf(adxlRollAligned(), 3) + ",\"pitch\":" + fmtf(adxlPitchAligned(), 3);
-  j += ",\"status\":\"" + sensorStatusString(adxlState) + "\"}";
+  j += ",\"status\":\"" + jsonEscape(sensorStatusString(adxlState)) + "\"}";
 
   j += ",\"diff\":{\"roll\":" + fmtf(diffRoll, 3) + ",\"pitch\":" + fmtf(diffPitch, 3) + "}";
   j += ",\"adxl_align\":{\"roll\":" + fmtf(cal.adxlRollAlign, 3) + ",\"pitch\":" + fmtf(cal.adxlPitchAlign, 3) + "}";
   j += ",\"accel_confidence\":" + fmtf(accelConfidence, 3);
 
   j += ",\"system\":{";
-  j += "\"status\":\"" + sysState.systemStatus + "\"";
-  j += ",\"calibration\":\"" + sysState.calibrationMessage + "\"";
-  j += ",\"uptime\":\"" + uptimeString() + "\"";
+  j += "\"status\":\"" + jsonEscape(sysState.systemStatus) + "\"";
+  j += ",\"calibration\":\"" + jsonEscape(sysState.calibrationMessage) + "\"";
+  j += ",\"uptime\":\"" + jsonEscape(uptimeString()) + "\"";
   j += ",\"updated_ms\":" + String(millis()) + "}";
 
   j += ",\"network\":{";
-  j += "\"ssid\":\"" + String(cfg.apSsid) + "\"";
-  j += ",\"ip\":\"" + WiFi.softAPIP().toString() + "\"";
+  j += "\"ssid\":\"" + jsonEscape(String(cfg.apSsid)) + "\"";
+  j += ",\"ip\":\"" + jsonEscape(WiFi.softAPIP().toString()) + "\"";
   j += ",\"clients\":" + String(WiFi.softAPgetStationNum()) + "}";
 
   j += "}";
@@ -954,9 +993,12 @@ void handleSettingsGet() {
   server.send(200, "application/json", j);
 }
 
-float argFloat(const char *k, float fallback) {
-  if (!server.hasArg(k)) return fallback;
-  return server.arg(k).toFloat();
+void setFloatFromArg(const char *k, float &target) {
+  if (!server.hasArg(k)) return;
+  float parsed = 0.0f;
+  if (tryParseFloat(server.arg(k), parsed)) {
+    target = parsed;
+  }
 }
 
 void parseAxisArgs() {
@@ -992,14 +1034,14 @@ void handleSettingsPost() {
     return;
   }
 
-  cfg.rollWarning = argFloat("rollWarning", cfg.rollWarning);
-  cfg.rollDanger = argFloat("rollDanger", cfg.rollDanger);
-  cfg.pitchWarning = argFloat("pitchWarning", cfg.pitchWarning);
-  cfg.pitchDanger = argFloat("pitchDanger", cfg.pitchDanger);
-  cfg.sensorDiffWarning = argFloat("sensorDiffWarning", cfg.sensorDiffWarning);
-  cfg.compBaseGain = argFloat("compBaseGain", cfg.compBaseGain);
-  cfg.accelLpfAlpha = argFloat("accelLpfAlpha", cfg.accelLpfAlpha);
-  cfg.linearAccelRejectG = argFloat("linearAccelRejectG", cfg.linearAccelRejectG);
+  setFloatFromArg("rollWarning", cfg.rollWarning);
+  setFloatFromArg("rollDanger", cfg.rollDanger);
+  setFloatFromArg("pitchWarning", cfg.pitchWarning);
+  setFloatFromArg("pitchDanger", cfg.pitchDanger);
+  setFloatFromArg("sensorDiffWarning", cfg.sensorDiffWarning);
+  setFloatFromArg("compBaseGain", cfg.compBaseGain);
+  setFloatFromArg("accelLpfAlpha", cfg.accelLpfAlpha);
+  setFloatFromArg("linearAccelRejectG", cfg.linearAccelRejectG);
   parseAxisArgs();
   sanitizeConfig();
   saveConfig();
