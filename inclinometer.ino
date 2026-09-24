@@ -247,6 +247,16 @@ bool tokenOkApi() {
   return false;
 }
 
+bool originAllowed() {
+  if (!server.hasHeader("Origin")) return true;
+  String origin = server.header("Origin");
+  if (origin.length() == 0) return true;
+  String ipOrigin = String("http://") + WiFi.softAPIP().toString();
+  if (origin == ipOrigin || origin == ipOrigin + "/") return true;
+  if (origin == String("http://") + cfg.apSsid || origin == String("http://") + cfg.apSsid + "/") return true;
+  return false;
+}
+
 void sanitizeConfig() {
   if (cfg.rollWarning < 0.5f) cfg.rollWarning = 0.5f;
   if (cfg.pitchWarning < 0.5f) cfg.pitchWarning = 0.5f;
@@ -258,7 +268,7 @@ void sanitizeConfig() {
   cfg.linearAccelRejectG = clampf(cfg.linearAccelRejectG, 0.05f, 1.5f);
 
   cfg.sensorMs = constrain(cfg.sensorMs, 5, 200);
-  cfg.filterMs = constrain(cfg.filterMs, 5, 200);
+  cfg.filterMs = constrain(cfg.filterMs, 5, 60);
   cfg.tftMs = constrain(cfg.tftMs, 50, 1000);
   cfg.serialMs = constrain(cfg.serialMs, 100, 3000);
   cfg.webMs = constrain(cfg.webMs, 50, 2000);
@@ -682,14 +692,21 @@ void filterTask() {
   }
 
   float norm = 1.0f;
+  bool accelSourceValid = false;
   if (mpuState.healthy) {
     norm = sqrtf(mpuState.axLpf * mpuState.axLpf + mpuState.ayLpf * mpuState.ayLpf + mpuState.azLpf * mpuState.azLpf);
+    accelSourceValid = true;
   } else if (adxlState.healthy) {
     norm = sqrtf(adxlState.axLpf * adxlState.axLpf + adxlState.ayLpf * adxlState.ayLpf + adxlState.azLpf * adxlState.azLpf);
+    accelSourceValid = true;
   }
 
-  float linearDev = fabsf(norm - 1.0f);
-  accelConfidence = 1.0f - clampf(linearDev / cfg.linearAccelRejectG, 0.0f, 1.0f);
+  if (!accelSourceValid || !isfinite(norm)) {
+    accelConfidence = 0.0f;
+  } else {
+    float linearDev = fabsf(norm - 1.0f);
+    accelConfidence = 1.0f - clampf(linearDev / cfg.linearAccelRejectG, 0.0f, 1.0f);
+  }
 
   if (hasAccel && accelConfidence > 0.02f) {
     float corrGain = cfg.compBaseGain * accelConfidence;
@@ -762,7 +779,6 @@ void serialTask() {
     diffP = fabsf(mpuState.pitch - adxlState.pitch);
   }
   Serial.printf("DIFF roll=%.2f pitch=%.2f accel_conf=%.2f status=%s uptime=%s\n", diffR, diffP, accelConfidence, sysState.systemStatus.c_str(), uptimeString().c_str());
-  Serial.printf("AP: %s IP: %s clients=%d\n", cfg.apSsid, WiFi.softAPIP().toString().c_str(), WiFi.softAPgetStationNum());
 }
 
 String basePageHtml(bool adminMode) {
@@ -911,6 +927,10 @@ void handleData() {
 }
 
 void handleSettingsGet() {
+  if (!originAllowed()) {
+    server.send(403, "application/json", "{\"error\":\"origin_forbidden\"}");
+    return;
+  }
   if (!tokenOkApi()) {
     server.send(401, "application/json", "{\"error\":\"unauthorized\"}");
     return;
@@ -959,6 +979,10 @@ void parseAxisArgs() {
 }
 
 void handleSettingsPost() {
+  if (!originAllowed()) {
+    server.send(403, "text/plain", "origin forbidden");
+    return;
+  }
   if (!tokenOkApi()) {
     server.send(401, "text/plain", "unauthorized");
     return;
@@ -980,6 +1004,10 @@ void handleSettingsPost() {
 }
 
 void handleCalibrate() {
+  if (!originAllowed()) {
+    server.send(403, "text/plain", "origin forbidden");
+    return;
+  }
   if (!tokenOkApi()) {
     server.send(401, "text/plain", "unauthorized");
     return;
@@ -996,6 +1024,10 @@ void handleCalibrate() {
 }
 
 void handleReset() {
+  if (!originAllowed()) {
+    server.send(403, "text/plain", "origin forbidden");
+    return;
+  }
   if (!tokenOkApi()) {
     server.send(401, "text/plain", "unauthorized");
     return;
@@ -1005,8 +1037,8 @@ void handleReset() {
 }
 
 void initWebServer() {
-  const char *headerKeys[] = {"X-Admin-Token"};
-  server.collectHeaders(headerKeys, 1);
+  const char *headerKeys[] = {"X-Admin-Token", "Origin"};
+  server.collectHeaders(headerKeys, 2);
 
   server.on("/", HTTP_GET, handleRoot);
   server.on("/admin", HTTP_GET, handleAdmin);
