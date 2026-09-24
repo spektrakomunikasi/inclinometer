@@ -11,16 +11,25 @@
 #include <math.h>
 
 // ========================= CONFIGURATION =========================
-struct PinConfig {
-  uint8_t i2cSDA = 21;
-  uint8_t i2cSCL = 22;
+constexpr uint8_t DEFAULT_I2C_SDA = 21;
+constexpr uint8_t DEFAULT_I2C_SCL = 22;
+constexpr uint8_t DEFAULT_TFT_SCK = 18;
+constexpr uint8_t DEFAULT_TFT_MISO = 19;
+constexpr uint8_t DEFAULT_TFT_MOSI = 23;
+constexpr uint8_t DEFAULT_TFT_CS = 5;
+constexpr uint8_t DEFAULT_TFT_DC = 2;
+constexpr uint8_t DEFAULT_TFT_RST = 4;
 
-  uint8_t tftSCK = 18;
-  uint8_t tftMISO = 19;
-  uint8_t tftMOSI = 23;
-  uint8_t tftCS = 5;
-  uint8_t tftDC = 2;
-  uint8_t tftRST = 4;
+struct PinConfig {
+  uint8_t i2cSDA = DEFAULT_I2C_SDA;
+  uint8_t i2cSCL = DEFAULT_I2C_SCL;
+
+  uint8_t tftSCK = DEFAULT_TFT_SCK;
+  uint8_t tftMISO = DEFAULT_TFT_MISO;
+  uint8_t tftMOSI = DEFAULT_TFT_MOSI;
+  uint8_t tftCS = DEFAULT_TFT_CS;
+  uint8_t tftDC = DEFAULT_TFT_DC;
+  uint8_t tftRST = DEFAULT_TFT_RST;
 };
 
 struct RuntimeConfig {
@@ -104,13 +113,16 @@ SystemData sysData;
 Adafruit_MPU6050 mpu6050;
 Adafruit_ADXL345_Unified adxl345(12345);
 SPIClass tftSPI(VSPI);
-Adafruit_ILI9341 tft(&tftSPI, pins.tftDC, pins.tftCS, pins.tftRST);
+Adafruit_ILI9341 tft(&tftSPI, DEFAULT_TFT_DC, DEFAULT_TFT_CS, DEFAULT_TFT_RST);
 WebServer server(80);
 Preferences preferences;
 String webDataCache = "{}";
 
 const char *AP_SSID = "SHIP-INCLINOMETER";
 String apPassword = "ShipInclino123";
+const String defaultApPassword = "ShipInclino123";
+String adminToken = "inclino-admin";
+const String defaultAdminToken = "inclino-admin";
 IPAddress apIP(192, 168, 4, 1);
 IPAddress apGateway(192, 168, 4, 1);
 IPAddress apSubnet(255, 255, 255, 0);
@@ -188,6 +200,10 @@ void checkAlarm();
 
 String webHtml();
 String buildDataJson();
+String jsonEscape(const String &input);
+bool isAuthorized();
+bool tryParseFloatArg(const char *name, float &outValue);
+bool tryParseUIntArg(const char *name, uint16_t &outValue);
 void handleRoot();
 void handleData();
 void handleSettingsGet();
@@ -489,17 +505,21 @@ void filterAngles(float dtSec) {
 
 void validateSensors() {
   if (!mpu.detected && !adxl.detected) {
+    sysData.rollDiff = 0.0f;
+    sysData.pitchDiff = 0.0f;
+    sysData.state = STATE_SENSOR_ERROR;
+    return;
+  }
+
+  if (!mpu.healthy || !adxl.healthy) {
+    sysData.rollDiff = 0.0f;
+    sysData.pitchDiff = 0.0f;
     sysData.state = STATE_SENSOR_ERROR;
     return;
   }
 
   sysData.rollDiff = fabsf(mpu.roll - adxl.roll);
   sysData.pitchDiff = fabsf(mpu.pitch - adxl.pitch);
-
-  if (!mpu.healthy || !adxl.healthy) {
-    sysData.state = STATE_SENSOR_ERROR;
-    return;
-  }
 
   if (sysData.rollDiff > cfg.diffThreshold || sysData.pitchDiff > cfg.diffThreshold) {
     sysData.state = STATE_SENSOR_WARNING;
@@ -704,10 +724,14 @@ void loadSettings() {
   cfg.webUpdateIntervalMs = preferences.getUShort("webInt", cfg.webUpdateIntervalMs);
   cfg.startupCalibration = preferences.getBool("startCal", cfg.startupCalibration);
   String pwd = preferences.getString("apPass", apPassword);
+  String token = preferences.getString("admTok", adminToken);
   preferences.end();
 
   if (pwd.length() >= 8) {
     apPassword = pwd;
+  }
+  if (token.length() >= 8) {
+    adminToken = token;
   }
 
   cfg.complementaryAlpha = constrain(cfg.complementaryAlpha, 0.70f, 0.995f);
@@ -725,11 +749,61 @@ void saveSettings() {
   preferences.putUShort("webInt", cfg.webUpdateIntervalMs);
   preferences.putBool("startCal", cfg.startupCalibration);
   preferences.putString("apPass", apPassword);
+  preferences.putString("admTok", adminToken);
   preferences.end();
 }
 
 void resetDefaultSettings() {
   cfg = cfgDefaults;
+  apPassword = defaultApPassword;
+  adminToken = defaultAdminToken;
+}
+
+String jsonEscape(const String &input) {
+  String out;
+  out.reserve(input.length() + 8);
+  for (size_t i = 0; i < input.length(); i++) {
+    char c = input[i];
+    if (c == '\"') out += "\\\"";
+    else if (c == '\\\\') out += "\\\\";
+    else if (c == '\n') out += "\\n";
+    else if (c == '\r') out += "\\r";
+    else if (c == '\t') out += "\\t";
+    else out += c;
+  }
+  return out;
+}
+
+bool isAuthorized() {
+  return server.hasArg("adminToken") && server.arg("adminToken") == adminToken;
+}
+
+bool tryParseFloatArg(const char *name, float &outValue) {
+  if (!server.hasArg(name)) {
+    return true;
+  }
+  String raw = server.arg(name);
+  char *endPtr = nullptr;
+  double value = strtod(raw.c_str(), &endPtr);
+  if (endPtr == raw.c_str() || *endPtr != '\0' || !isfinite((float)value)) {
+    return false;
+  }
+  outValue = (float)value;
+  return true;
+}
+
+bool tryParseUIntArg(const char *name, uint16_t &outValue) {
+  if (!server.hasArg(name)) {
+    return true;
+  }
+  String raw = server.arg(name);
+  char *endPtr = nullptr;
+  long value = strtol(raw.c_str(), &endPtr, 10);
+  if (endPtr == raw.c_str() || *endPtr != '\0' || value < 0 || value > 65535) {
+    return false;
+  }
+  outValue = (uint16_t)value;
+  return true;
 }
 
 void handleRoot() {
@@ -744,13 +818,20 @@ void handleData() {
 }
 
 String buildDataJson() {
+  String status = jsonEscape(statusText(sysData.state));
+  String rollDir = jsonEscape(sysData.rollDirection);
+  String pitchDir = jsonEscape(sysData.pitchDirection);
+  String uptime = jsonEscape(uptimeString());
+  String ssid = jsonEscape(String(AP_SSID));
+  String ipStr = jsonEscape(WiFi.softAPIP().toString());
+
   String json = "{";
   json += "\"online\":true,";
   json += "\"timestamp\":" + String(millis()) + ",";
-  json += "\"uptime\":\"" + uptimeString() + "\",";
-  json += "\"status\":\"" + statusText(sysData.state) + "\",";
-  json += "\"rollDir\":\"" + sysData.rollDirection + "\",";
-  json += "\"pitchDir\":\"" + sysData.pitchDirection + "\",";
+  json += "\"uptime\":\"" + uptime + "\",";
+  json += "\"status\":\"" + status + "\",";
+  json += "\"rollDir\":\"" + rollDir + "\",";
+  json += "\"pitchDir\":\"" + pitchDir + "\",";
 
   json += "\"mpu\":{";
   json += "\"detected\":" + String(mpu.detected ? "true" : "false") + ",";
@@ -773,8 +854,8 @@ String buildDataJson() {
   json += "},";
 
   json += "\"wifi\":{";
-  json += "\"ssid\":\"" + String(AP_SSID) + "\",";
-  json += "\"ip\":\"" + WiFi.softAPIP().toString() + "\",";
+  json += "\"ssid\":\"" + ssid + "\",";
+  json += "\"ip\":\"" + ipStr + "\",";
   json += "\"rssi\":" + String(WiFi.RSSI()) + "},";
 
   json += "\"rates\":{";
@@ -812,26 +893,49 @@ void handleSettingsGet() {
 }
 
 void handleSettingsPost() {
-  auto readArgF = [](const char *name, float fallback) {
-    return (server.hasArg(name)) ? server.arg(name).toFloat() : fallback;
-  };
-  auto readArgI = [](const char *name, int fallback) {
-    return (server.hasArg(name)) ? server.arg(name).toInt() : fallback;
-  };
+  if (!isAuthorized()) {
+    server.send(401, "application/json", "{\"ok\":false,\"reason\":\"unauthorized\"}");
+    return;
+  }
 
-  cfg.rollWarning = readArgF("rollWarning", cfg.rollWarning);
-  cfg.rollDanger = readArgF("rollDanger", cfg.rollDanger);
-  cfg.pitchWarning = readArgF("pitchWarning", cfg.pitchWarning);
-  cfg.pitchDanger = readArgF("pitchDanger", cfg.pitchDanger);
-  cfg.diffThreshold = readArgF("diffThreshold", cfg.diffThreshold);
-  cfg.complementaryAlpha = readArgF("alpha", cfg.complementaryAlpha);
-  cfg.webUpdateIntervalMs = (uint16_t)readArgI("webUpdateMs", cfg.webUpdateIntervalMs);
+  float rollWarning = cfg.rollWarning;
+  float rollDanger = cfg.rollDanger;
+  float pitchWarning = cfg.pitchWarning;
+  float pitchDanger = cfg.pitchDanger;
+  float diffThreshold = cfg.diffThreshold;
+  float alpha = cfg.complementaryAlpha;
+  uint16_t webUpdateMs = cfg.webUpdateIntervalMs;
+
+  if (!tryParseFloatArg("rollWarning", rollWarning) ||
+      !tryParseFloatArg("rollDanger", rollDanger) ||
+      !tryParseFloatArg("pitchWarning", pitchWarning) ||
+      !tryParseFloatArg("pitchDanger", pitchDanger) ||
+      !tryParseFloatArg("diffThreshold", diffThreshold) ||
+      !tryParseFloatArg("alpha", alpha) ||
+      !tryParseUIntArg("webUpdateMs", webUpdateMs)) {
+    server.send(400, "application/json", "{\"ok\":false,\"reason\":\"invalid_numeric_input\"}");
+    return;
+  }
+
+  cfg.rollWarning = rollWarning;
+  cfg.rollDanger = rollDanger;
+  cfg.pitchWarning = pitchWarning;
+  cfg.pitchDanger = pitchDanger;
+  cfg.diffThreshold = diffThreshold;
+  cfg.complementaryAlpha = alpha;
+  cfg.webUpdateIntervalMs = webUpdateMs;
   cfg.startupCalibration = server.hasArg("startupCalibration") ? (server.arg("startupCalibration") == "1") : cfg.startupCalibration;
 
   if (server.hasArg("apPassword")) {
     String p = server.arg("apPassword");
     if (p.length() >= 8 && p.length() <= 63) {
       apPassword = p;
+    }
+  }
+  if (server.hasArg("newAdminToken")) {
+    String p = server.arg("newAdminToken");
+    if (p.length() >= 8 && p.length() <= 63) {
+      adminToken = p;
     }
   }
 
@@ -848,11 +952,19 @@ void handleSettingsPost() {
 }
 
 void handleCalibrate() {
+  if (!isAuthorized()) {
+    server.send(401, "application/json", "{\"ok\":false,\"reason\":\"unauthorized\"}");
+    return;
+  }
   bool ok = calibrateSensors();
   server.send(ok ? 200 : 409, "application/json", ok ? "{\"ok\":true}" : "{\"ok\":false,\"reason\":\"sensor_moving_or_missing\"}");
 }
 
 void handleReset() {
+  if (!isAuthorized()) {
+    server.send(401, "application/json", "{\"ok\":false,\"reason\":\"unauthorized\"}");
+    return;
+  }
   resetDefaultSettings();
   saveSettings();
   server.send(200, "application/json", "{\"ok\":true}");
@@ -943,6 +1055,7 @@ button{background:#173455;cursor:pointer}button:hover{filter:brightness(1.1)}
     <div class="card">
       <h3>SETTINGS</h3>
       <div class="meta">
+        <label>ADMIN TOKEN<input id="adminToken" type="password" minlength="8" maxlength="63"></label>
         <label>ROLL WARNING<input id="rollWarning" type="number" step="0.1"></label>
         <label>ROLL DANGER<input id="rollDanger" type="number" step="0.1"></label>
         <label>PITCH WARNING<input id="pitchWarning" type="number" step="0.1"></label>
@@ -951,6 +1064,7 @@ button{background:#173455;cursor:pointer}button:hover{filter:brightness(1.1)}
         <label>FILTER ALPHA<input id="alpha" type="number" step="0.001" min="0.70" max="0.995"></label>
         <label>WEB UPDATE MS<input id="webUpdateMs" type="number" step="10" min="100" max="1000"></label>
         <label>AP PASSWORD<input id="apPassword" type="text" minlength="8" maxlength="63"></label>
+        <label>NEW ADMIN TOKEN<input id="newAdminToken" type="password" minlength="8" maxlength="63"></label>
         <label style="display:flex;align-items:center;gap:8px;margin-top:24px">STARTUP CALIBRATION<input id="startupCalibration" type="checkbox" style="width:auto"></label>
       </div>
       <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:10px">
@@ -1040,6 +1154,7 @@ async function updateData(){
 
 async function post(path,params){
   const body=new URLSearchParams(params||{});
+  body.set('adminToken',byId('adminToken').value||'');
   const r=await fetch(path,{method:'POST',body});
   return r;
 }
@@ -1050,6 +1165,7 @@ byId('btnSave').onclick=async()=>{
     pitchWarning:byId('pitchWarning').value,pitchDanger:byId('pitchDanger').value,
     diffThreshold:byId('diffThreshold').value,alpha:byId('alpha').value,
     webUpdateMs:byId('webUpdateMs').value,apPassword:byId('apPassword').value,
+    newAdminToken:byId('newAdminToken').value,
     startupCalibration:byId('startupCalibration').checked?'1':'0'
   };
   await post('/api/settings',p); await loadSettings();

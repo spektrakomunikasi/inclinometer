@@ -65,6 +65,7 @@ Default:
 - SSID: `SHIP-INCLINOMETER`
 - IP AP: `192.168.4.1`
 - Password: variabel konfigurasi (`apPassword`) dan bisa diubah dari web settings.
+- Admin token manajemen (default): `inclino-admin` (dibutuhkan untuk aksi SAVE/CALIBRATE/RESET).
 
 ## 7) Cara compile & upload
 1. Buka folder project di Arduino IDE.
@@ -90,6 +91,8 @@ Di panel web settings tersedia:
 - Filter alpha (complementary)
 - Web update interval
 - AP password
+- Admin token (untuk autentikasi aksi manajemen)
+- New admin token (opsional untuk mengganti token lama)
 
 Tombol:
 - **SAVE SETTINGS** -> simpan ke NVS (Preferences)
