@@ -203,20 +203,28 @@ String fmtf(float v, uint8_t p = 2) {
 
 String jsonEscape(const String &in) {
   String out;
-  out.reserve(in.length() + 8);
+  out.reserve(in.length() + 12);
   for (size_t i = 0; i < in.length(); i++) {
-    char c = in[i];
+    unsigned char c = (unsigned char)in[i];
     if (c == '\\' || c == '\"') {
       out += '\\';
-      out += c;
+      out += (char)c;
     } else if (c == '\n') {
       out += "\\n";
     } else if (c == '\r') {
       out += "\\r";
     } else if (c == '\t') {
       out += "\\t";
+    } else if (c == '\b') {
+      out += "\\b";
+    } else if (c == '\f') {
+      out += "\\f";
+    } else if (c < 0x20) {
+      char esc[7];
+      snprintf(esc, sizeof(esc), "\\u%04X", (unsigned int)c);
+      out += esc;
     } else {
-      out += c;
+      out += (char)c;
     }
   }
   return out;
@@ -227,6 +235,15 @@ bool tryParseFloat(const String &s, float &out) {
   char *endPtr = nullptr;
   out = strtof(s.c_str(), &endPtr);
   if (endPtr == s.c_str() || *endPtr != '\0' || !isfinite(out)) return false;
+  return true;
+}
+
+bool tryParseInt(const String &s, int &out) {
+  if (s.length() == 0) return false;
+  char *endPtr = nullptr;
+  long v = strtol(s.c_str(), &endPtr, 10);
+  if (endPtr == s.c_str() || *endPtr != '\0') return false;
+  out = (int)v;
   return true;
 }
 
@@ -993,35 +1010,50 @@ void handleSettingsGet() {
   server.send(200, "application/json", j);
 }
 
-void setFloatFromArg(const char *k, float &target) {
-  if (!server.hasArg(k)) return;
+bool setFloatFromArg(const char *k, float &target) {
+  if (!server.hasArg(k)) return true;
   float parsed = 0.0f;
   if (tryParseFloat(server.arg(k), parsed)) {
     target = parsed;
+    return true;
   }
+  return false;
 }
 
-void parseAxisArgs() {
-  if (server.hasArg("adxlAxis")) {
-    String a = server.arg("adxlAxis");
-    int p1 = a.indexOf(',');
-    int p2 = a.indexOf(',', p1 + 1);
-    if (p1 > 0 && p2 > p1) {
-      cfg.adxlAxis.x = a.substring(0, p1).toInt();
-      cfg.adxlAxis.y = a.substring(p1 + 1, p2).toInt();
-      cfg.adxlAxis.z = a.substring(p2 + 1).toInt();
-    }
-  }
-  if (server.hasArg("adxlSign")) {
-    String a = server.arg("adxlSign");
-    int p1 = a.indexOf(',');
-    int p2 = a.indexOf(',', p1 + 1);
-    if (p1 > 0 && p2 > p1) {
-      cfg.adxlAxis.sx = a.substring(0, p1).toInt();
-      cfg.adxlAxis.sy = a.substring(p1 + 1, p2).toInt();
-      cfg.adxlAxis.sz = a.substring(p2 + 1).toInt();
-    }
-  }
+bool parseAxisCsvArg(const char *key, int &a, int &b, int &c) {
+  if (!server.hasArg(key)) return true;
+  String raw = server.arg(key);
+  int p1 = raw.indexOf(',');
+  int p2 = raw.indexOf(',', p1 + 1);
+  if (p1 <= 0 || p2 <= p1) return false;
+  int v1 = 0, v2 = 0, v3 = 0;
+  if (!tryParseInt(raw.substring(0, p1), v1)) return false;
+  if (!tryParseInt(raw.substring(p1 + 1, p2), v2)) return false;
+  if (!tryParseInt(raw.substring(p2 + 1), v3)) return false;
+  a = v1;
+  b = v2;
+  c = v3;
+  return true;
+}
+
+bool parseAxisArgs(Config &target) {
+  int ax = target.adxlAxis.x;
+  int ay = target.adxlAxis.y;
+  int az = target.adxlAxis.z;
+  int sx = target.adxlAxis.sx;
+  int sy = target.adxlAxis.sy;
+  int sz = target.adxlAxis.sz;
+
+  if (!parseAxisCsvArg("adxlAxis", ax, ay, az)) return false;
+  if (!parseAxisCsvArg("adxlSign", sx, sy, sz)) return false;
+
+  target.adxlAxis.x = ax;
+  target.adxlAxis.y = ay;
+  target.adxlAxis.z = az;
+  target.adxlAxis.sx = sx;
+  target.adxlAxis.sy = sy;
+  target.adxlAxis.sz = sz;
+  return true;
 }
 
 void handleSettingsPost() {
@@ -1034,18 +1066,26 @@ void handleSettingsPost() {
     return;
   }
 
-  setFloatFromArg("rollWarning", cfg.rollWarning);
-  setFloatFromArg("rollDanger", cfg.rollDanger);
-  setFloatFromArg("pitchWarning", cfg.pitchWarning);
-  setFloatFromArg("pitchDanger", cfg.pitchDanger);
-  setFloatFromArg("sensorDiffWarning", cfg.sensorDiffWarning);
-  setFloatFromArg("compBaseGain", cfg.compBaseGain);
-  setFloatFromArg("accelLpfAlpha", cfg.accelLpfAlpha);
-  setFloatFromArg("linearAccelRejectG", cfg.linearAccelRejectG);
-  parseAxisArgs();
+  Config next = cfg;
+  bool valid = true;
+  valid &= setFloatFromArg("rollWarning", next.rollWarning);
+  valid &= setFloatFromArg("rollDanger", next.rollDanger);
+  valid &= setFloatFromArg("pitchWarning", next.pitchWarning);
+  valid &= setFloatFromArg("pitchDanger", next.pitchDanger);
+  valid &= setFloatFromArg("sensorDiffWarning", next.sensorDiffWarning);
+  valid &= setFloatFromArg("compBaseGain", next.compBaseGain);
+  valid &= setFloatFromArg("accelLpfAlpha", next.accelLpfAlpha);
+  valid &= setFloatFromArg("linearAccelRejectG", next.linearAccelRejectG);
+  valid &= parseAxisArgs(next);
+
+  if (!valid) {
+    server.send(400, "text/plain", "invalid settings payload");
+    return;
+  }
+
+  cfg = next;
   sanitizeConfig();
   saveConfig();
-
   server.send(200, "text/plain", "settings saved");
 }
 
