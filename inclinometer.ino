@@ -1047,6 +1047,11 @@ bool parseAxisArgs(Config &target) {
   if (!parseAxisCsvArg("adxlAxis", ax, ay, az)) return false;
   if (!parseAxisCsvArg("adxlSign", sx, sy, sz)) return false;
 
+  bool axisInRange = (ax >= 0 && ax <= 2) && (ay >= 0 && ay <= 2) && (az >= 0 && az <= 2);
+  bool axisUnique = (ax != ay) && (ax != az) && (ay != az);
+  bool signValid = (sx == -1 || sx == 1) && (sy == -1 || sy == 1) && (sz == -1 || sz == 1);
+  if (!axisInRange || !axisUnique || !signValid) return false;
+
   target.adxlAxis.x = ax;
   target.adxlAxis.y = ay;
   target.adxlAxis.z = az;
@@ -1172,10 +1177,11 @@ String randomToken() {
 }
 
 bool isValidAdminTokenFormat(const String &v) {
-  const size_t expectedLen = strlen(ADMIN_TOKEN_PREFIX) + (ADMIN_TOKEN_RANDOM_BYTES * 2);
+  const size_t prefixLen = strlen(ADMIN_TOKEN_PREFIX);
+  const size_t expectedLen = prefixLen + (ADMIN_TOKEN_RANDOM_BYTES * 2);
   if (!v.startsWith(ADMIN_TOKEN_PREFIX)) return false;
   if (v.length() != expectedLen) return false;
-  for (size_t i = strlen(ADMIN_TOKEN_PREFIX); i < v.length(); i++) {
+  for (size_t i = prefixLen; i < v.length(); i++) {
     char c = v[i];
     bool hexDigit = (c >= '0' && c <= '9') || (c >= 'A' && c <= 'F');
     if (!hexDigit) return false;
