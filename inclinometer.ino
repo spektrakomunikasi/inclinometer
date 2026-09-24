@@ -894,10 +894,10 @@ String jsonEscape(const String &input) {
 }
 
 bool isAuthorized() {
-  if (!server.hasHeader("X-Admin-Token")) {
-    return false;
+  if (server.hasHeader("X-Admin-Token") && server.header("X-Admin-Token") == adminToken) {
+    return true;
   }
-  return server.header("X-Admin-Token") == adminToken;
+  return server.authenticate("admin", apPassword.c_str());
 }
 
 bool tryParseFloatArg(const char *name, float &outValue) {

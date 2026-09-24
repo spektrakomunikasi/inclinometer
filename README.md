@@ -64,8 +64,8 @@ Semua pin dibuat sebagai variabel konfigurasi agar mudah diubah.
 Default:
 - SSID: `SHIP-INCLINOMETER`
 - IP AP: `192.168.4.1`
-- Password AP default otomatis acak saat boot pertama: `Ship-<8 HEX acak>` (langsung disimpan ke NVS).
-- Admin token manajemen default otomatis acak saat boot pertama: `Admin-<16 HEX acak>` (langsung disimpan ke NVS).
+- Password AP fallback otomatis acak saat boot: `Ship-<8 HEX acak>`, lalu dipakai permanen dari NVS setelah tersimpan.
+- Admin token fallback otomatis acak saat boot: `Admin-<16 HEX acak>`, lalu dipakai permanen dari NVS setelah tersimpan.
 - Keduanya bisa diubah dari web settings.
 
 ## 7) Cara compile & upload
