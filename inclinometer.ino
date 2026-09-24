@@ -183,6 +183,7 @@ void initCredentialDefaults();
 void initSensors();
 void initDisplay();
 void initWiFiAP();
+void applyAccessPointConfig();
 void initWebServer();
 
 bool calibrateSensors();
@@ -335,6 +336,11 @@ void initDisplay() {
 
 void initWiFiAP() {
   WiFi.mode(WIFI_AP);
+  applyAccessPointConfig();
+}
+
+void applyAccessPointConfig() {
+  WiFi.softAPdisconnect(true);
   WiFi.softAPConfig(apIP, apGateway, apSubnet);
   WiFi.softAP(AP_SSID, apPassword.c_str());
 }
@@ -892,7 +898,7 @@ String buildDataJson() {
   json += "\"wifi\":{";
   json += "\"ssid\":\"" + ssid + "\",";
   json += "\"ip\":\"" + ipStr + "\",";
-  json += "\"rssi\":" + String(WiFi.RSSI()) + "},";
+  json += "\"clients\":" + String(WiFi.softAPgetStationNum()) + "},";
 
   json += "\"rates\":{";
   json += "\"loopHz\":" + String(sysData.loopRateHz, 1) + ",";
@@ -962,6 +968,7 @@ void handleSettingsPost() {
   cfg.webUpdateIntervalMs = webUpdateMs;
   cfg.startupCalibration = server.hasArg("startupCalibration") ? (server.arg("startupCalibration") == "1") : cfg.startupCalibration;
 
+  String oldApPassword = apPassword;
   if (server.hasArg("apPassword")) {
     String p = server.arg("apPassword");
     if (p.length() >= 8 && p.length() <= 63) {
@@ -983,6 +990,10 @@ void handleSettingsPost() {
   cfg.complementaryAlpha = constrain(cfg.complementaryAlpha, 0.70f, 0.995f);
   cfg.webUpdateIntervalMs = constrain(cfg.webUpdateIntervalMs, (uint16_t)100, (uint16_t)1000);
 
+  if (apPassword != oldApPassword) {
+    applyAccessPointConfig();
+  }
+
   saveSettings();
   server.send(200, "application/json", "{\"ok\":true}");
 }
@@ -1002,6 +1013,7 @@ void handleReset() {
     return;
   }
   resetDefaultSettings();
+  applyAccessPointConfig();
   saveSettings();
   server.send(200, "application/json", "{\"ok\":true}");
 }
@@ -1083,7 +1095,7 @@ button{background:#173455;cursor:pointer}button:hover{filter:brightness(1.1)}
       <h3>NETWORK</h3>
       <div class="kv"><span>WiFi SSID</span><b id="ssid">-</b></div>
       <div class="kv"><span>IP</span><b id="ip">-</b></div>
-      <div class="kv"><span>RSSI</span><b id="rssi">-</b></div>
+      <div class="kv"><span>Clients</span><b id="clients">-</b></div>
     </div>
   </div>
 
@@ -1154,7 +1166,7 @@ async function updateData(){
     byId('diffR').textContent=fmt(d.diff.roll); byId('diffP').textContent=fmt(d.diff.pitch);
     byId('statusTxt').textContent=d.status; setStatusColor(d.status);
     byId('loopHz').textContent=`${Number(d.rates.loopHz).toFixed(1)} Hz`; byId('uptime').textContent=d.uptime;
-    byId('ssid').textContent=d.wifi.ssid; byId('ip').textContent=d.wifi.ip; byId('rssi').textContent=`${d.wifi.rssi} dBm`;
+    byId('ssid').textContent=d.wifi.ssid; byId('ip').textContent=d.wifi.ip; byId('clients').textContent=`${d.wifi.clients}`;
 
     byId('mpuBox').innerHTML=kv([
       ['Status', d.mpu.detected?(d.mpu.healthy?'OK':'ERROR'):'NOT FOUND'],

@@ -22,7 +22,7 @@ Library bawaan ESP32 core:
 - `SPI`
 
 ## 2) Struktur file
-- `/home/runner/work/inclinometer/inclinometer/inclinometer.ino`
+- `inclinometer.ino`
 
 ## 3) Konfigurasi pin
 Di `inclinometer.ino` bagian `PinConfig`:
