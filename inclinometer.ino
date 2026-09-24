@@ -38,6 +38,7 @@ static const char *PREF_NS = "inclino";
 static const float DEG_PER_RAD = 57.2957795131f;
 static const char *ADMIN_TOKEN_PREFIX = "ADM-";
 static const uint8_t ADMIN_TOKEN_RANDOM_BYTES = 32;
+static const char *ADMIN_HOST_ALIAS = "ship-inclinometer.local";
 
 // =========================
 // Config
@@ -257,6 +258,8 @@ bool originAllowed() {
   if (origin.length() == 0) return false;
   String ipOrigin = String("http://") + WiFi.softAPIP().toString();
   if (origin == ipOrigin || origin == ipOrigin + "/" || origin == ipOrigin + ":80" || origin == ipOrigin + ":80/") return true;
+  String aliasOrigin = String("http://") + ADMIN_HOST_ALIAS;
+  if (origin == aliasOrigin || origin == aliasOrigin + "/" || origin == aliasOrigin + ":80" || origin == aliasOrigin + ":80/") return true;
   return false;
 }
 
@@ -1099,15 +1102,18 @@ bool isValidAdminTokenFormat(const String &v) {
 }
 
 void loadOrCreateAdminToken() {
-  prefs.begin(PREF_NS, false);
+  prefs.begin(PREF_NS, true);
   String stored = prefs.getString("adminToken", "");
-  if (!isValidAdminTokenFormat(stored)) {
-    stored = randomToken();
-    prefs.putString("adminToken", stored);
-  }
-  adminToken = stored;
   showCommissioningSecrets = !prefs.getBool("commissioned", false);
   prefs.end();
+
+  if (!isValidAdminTokenFormat(stored)) {
+    stored = randomToken();
+    prefs.begin(PREF_NS, false);
+    prefs.putString("adminToken", stored);
+    prefs.end();
+  }
+  adminToken = stored;
 }
 
 void setup() {

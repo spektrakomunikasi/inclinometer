@@ -112,7 +112,7 @@ Jika sensor hilang atau tidak sehat, sistem tetap berjalan (tidak crash), dashbo
 
 Untuk endpoint admin API, request wajib:
 - header `X-Admin-Token` yang valid
-- header `Origin` yang valid untuk origin device (`http://192.168.4.1` atau `http://192.168.4.1:80`)
+- header `Origin` yang valid untuk origin device (`http://192.168.4.1`, `http://192.168.4.1:80`, atau alias host `http://ship-inclinometer.local`)
 
 Token query URL hanya dipakai untuk akses awal ke halaman `/admin?token=...`.
 
