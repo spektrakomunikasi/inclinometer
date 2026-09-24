@@ -6,7 +6,7 @@ Sketch Arduino IDE untuk ESP32 dengan:
 - TFT ILI9341 320x240 (SPI)
 - Dashboard web lokal via ESP32 Access Point (`192.168.4.1`)
 
-File utama: `/home/runner/work/inclinometer/inclinometer/inclinometer.ino`
+File utama: `inclinometer.ino`
 
 ## Fitur utama
 

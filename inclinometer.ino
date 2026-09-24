@@ -128,9 +128,12 @@ struct StatusState {
 StatusState sysState;
 
 String adminToken;
+bool showCommissioningSecrets = false;
 
 float fusedRoll = 0.0f;
 float fusedPitch = 0.0f;
+float outputRollDeg = 0.0f;
+float outputPitchDeg = 0.0f;
 float accelConfidence = 0.0f;
 uint32_t lastSensorMs = 0;
 uint32_t lastFilterMs = 0;
@@ -188,6 +191,17 @@ String pitchDirection(float pitch) {
   if (pitch > 0.5f) return "FORWARD";
   if (pitch < -0.5f) return "BACKWARD";
   return "LEVEL";
+}
+
+void updateOutputAngles() {
+  outputRollDeg = fusedRoll;
+  outputPitchDeg = fusedPitch;
+  if (cal.calibrated) {
+    outputRollDeg -= cal.zeroRollRef;
+    outputPitchDeg -= cal.zeroPitchRef;
+  }
+  if (!isfinite(outputRollDeg) || fabsf(outputRollDeg) > 180.0f) outputRollDeg = 0.0f;
+  if (!isfinite(outputPitchDeg) || fabsf(outputPitchDeg) > 180.0f) outputPitchDeg = 0.0f;
 }
 
 bool tokenOk() {
@@ -314,8 +328,8 @@ String statusLevel() {
   bool sensorError = (!mpuState.present && !adxlState.present) || (!mpuState.healthy && !adxlState.healthy);
   if (sensorError) return "SENSOR_ERROR";
 
-  float ar = fabsf(fusedRoll);
-  float ap = fabsf(fusedPitch);
+  float ar = fabsf(outputRollDeg);
+  float ap = fabsf(outputPitchDeg);
   if (ar >= cfg.rollDanger || ap >= cfg.pitchDanger) return "DANGER_TILT";
 
   bool tiltWarn = (ar >= cfg.rollWarning || ap >= cfg.pitchWarning);
@@ -629,14 +643,10 @@ void filterTask() {
     fusedPitch += corrGain * (accelPitch - fusedPitch);
   }
 
-  if (cal.calibrated) {
-    fusedRoll -= cal.zeroRollRef;
-    fusedPitch -= cal.zeroPitchRef;
-  }
+  if (!isfinite(fusedRoll) || fabsf(fusedRoll) > 360.0f) fusedRoll = accelRoll;
+  if (!isfinite(fusedPitch) || fabsf(fusedPitch) > 360.0f) fusedPitch = accelPitch;
 
-  if (!isfinite(fusedRoll) || fabsf(fusedRoll) > 180.0f) fusedRoll = 0.0f;
-  if (!isfinite(fusedPitch) || fabsf(fusedPitch) > 180.0f) fusedPitch = 0.0f;
-
+  updateOutputAngles();
   sysState.systemStatus = statusLevel();
 }
 
@@ -654,19 +664,19 @@ void updateTftTask() {
   tft.setTextColor(ILI9341_WHITE, ILI9341_BLACK);
   tft.setCursor(8, 40);
   tft.print("ROLL : ");
-  tft.print(fmtf(fusedRoll));
+  tft.print(fmtf(outputRollDeg));
   tft.print((char)247);
   tft.setCursor(8, 62);
   tft.print("PITCH: ");
-  tft.print(fmtf(fusedPitch));
+  tft.print(fmtf(outputPitchDeg));
   tft.print((char)247);
 
   tft.setCursor(8, 86);
   tft.print("R DIR: ");
-  tft.print(rollDirection(fusedRoll));
+  tft.print(rollDirection(outputRollDeg));
   tft.setCursor(8, 108);
   tft.print("P DIR: ");
-  tft.print(pitchDirection(fusedPitch));
+  tft.print(pitchDirection(outputPitchDeg));
 
   tft.setCursor(8, 136);
   tft.print("MPU  ");
@@ -684,7 +694,7 @@ void updateTftTask() {
 
 void serialTask() {
   Serial.println(F("----- Inclinometer Telemetry -----"));
-  Serial.printf("ROLL: %.2f deg (%s) | PITCH: %.2f deg (%s)\n", fusedRoll, rollDirection(fusedRoll).c_str(), fusedPitch, pitchDirection(fusedPitch).c_str());
+  Serial.printf("ROLL: %.2f deg (%s) | PITCH: %.2f deg (%s)\n", outputRollDeg, rollDirection(outputRollDeg).c_str(), outputPitchDeg, pitchDirection(outputPitchDeg).c_str());
 
   Serial.printf("MPU6050 present=%d healthy=%d acc[g]=(%.3f,%.3f,%.3f) gyro[dps]=(%.3f,%.3f,%.3f) roll=%.2f pitch=%.2f\n",
                 mpuState.present, mpuState.healthy, mpuState.ax, mpuState.ay, mpuState.az, mpuState.gx, mpuState.gy, mpuState.gz, mpuState.roll, mpuState.pitch);
@@ -702,7 +712,6 @@ void serialTask() {
 }
 
 String basePageHtml(bool adminMode) {
-  String token = server.hasArg("token") ? server.arg("token") : "";
   String h = F(
       "<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
       "<title>Ship Inclinometer</title><style>"
@@ -744,9 +753,7 @@ String basePageHtml(bool adminMode) {
   h += F("</div><script>"
          "const admin=" );
   h += adminMode ? "true" : "false";
-  h += F(";const token='" );
-  h += token;
-  h += F("';"
+  h += F(";const token=(new URLSearchParams(window.location.search)).get('token')||'';"
          "const q=(i)=>document.getElementById(i);"
          "const fmt=(v,p=2)=>Number.isFinite(v)?v.toFixed(p):'n/a';"
          "async function updateData(){try{const r=await fetch('/api/data');const d=await r.json();"
@@ -794,10 +801,10 @@ String buildDataJson() {
   }
 
   String j = "{";
-  j += "\"roll\":" + fmtf(fusedRoll, 3);
-  j += ",\"pitch\":" + fmtf(fusedPitch, 3);
-  j += ",\"roll_direction\":\"" + rollDirection(fusedRoll) + "\"";
-  j += ",\"pitch_direction\":\"" + pitchDirection(fusedPitch) + "\"";
+  j += "\"roll\":" + fmtf(outputRollDeg, 3);
+  j += ",\"pitch\":" + fmtf(outputPitchDeg, 3);
+  j += ",\"roll_direction\":\"" + rollDirection(outputRollDeg) + "\"";
+  j += ",\"pitch_direction\":\"" + pitchDirection(outputPitchDeg) + "\"";
 
   j += ",\"mpu\":{";
   j += "\"ax\":" + fmtf(mpuState.ax, 4) + ",\"ay\":" + fmtf(mpuState.ay, 4) + ",\"az\":" + fmtf(mpuState.az, 4);
@@ -954,9 +961,17 @@ void printBootInfo() {
   Serial.printf("TFT SPI pins SCK=%d MISO=%d MOSI=%d CS=%d DC=%d RST=%d\n", pins.tftSck, pins.tftMiso, pins.tftMosi, pins.tftCs, pins.tftDc, pins.tftRst);
   Serial.printf("MPU6050: %s | ADXL345: %s | TFT: %s\n", mpuState.present ? "detected" : "missing", adxlState.present ? "detected" : "missing", sysState.tftOk ? "ok" : "error");
   Serial.printf("AP SSID: %s\n", cfg.apSsid);
-  Serial.printf("AP PASS: %s\n", cfg.apPassword);
   Serial.printf("AP IP: %s\n", WiFi.softAPIP().toString().c_str());
-  Serial.printf("Admin URL: http://%s/admin?token=%s\n", WiFi.softAPIP().toString().c_str(), adminToken.c_str());
+  if (showCommissioningSecrets) {
+    Serial.println(F("Commissioning credentials (shown once):"));
+    Serial.printf("AP PASS: %s\n", cfg.apPassword);
+    Serial.printf("Admin URL: http://%s/admin?token=%s\n", WiFi.softAPIP().toString().c_str(), adminToken.c_str());
+    prefs.begin(PREF_NS, false);
+    prefs.putBool("commissioned", true);
+    prefs.end();
+  } else {
+    Serial.println(F("Commissioning credentials hidden after first boot. Reset NVS to show again."));
+  }
 }
 
 void setup() {
@@ -970,6 +985,10 @@ void setup() {
   char tokenBuf[24];
   snprintf(tokenBuf, sizeof(tokenBuf), "ADM-%06llX", (unsigned long long)(mac & 0xFFFFFFULL));
   adminToken = String(tokenBuf);
+
+  prefs.begin(PREF_NS, true);
+  showCommissioningSecrets = !prefs.getBool("commissioned", false);
+  prefs.end();
 
   initSensors();
   initDisplay();
@@ -989,6 +1008,7 @@ void setup() {
     sysState.calibrationMessage = "skipped";
   }
 
+  updateOutputAngles();
   sysState.systemStatus = statusLevel();
   printBootInfo();
 }
