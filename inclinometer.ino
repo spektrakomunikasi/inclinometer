@@ -36,6 +36,8 @@ Preferences prefs;
 
 static const char *PREF_NS = "inclino";
 static const float DEG_PER_RAD = 57.2957795131f;
+static const char *ADMIN_TOKEN_PREFIX = "ADM-";
+static const uint8_t ADMIN_TOKEN_RANDOM_BYTES = 32;
 
 // =========================
 // Config
@@ -1074,19 +1076,21 @@ void printBootInfo() {
 }
 
 String randomToken() {
-  char b[65];
-  for (uint8_t i = 0; i < 32; i++) {
+  const size_t hexLen = ADMIN_TOKEN_RANDOM_BYTES * 2;
+  char b[(ADMIN_TOKEN_RANDOM_BYTES * 2) + 1];
+  for (uint8_t i = 0; i < ADMIN_TOKEN_RANDOM_BYTES; i++) {
     uint8_t r = (uint8_t)(esp_random() & 0xFF);
     snprintf(&b[i * 2], 3, "%02X", r);
   }
-  b[64] = '\0';
-  return String("ADM-") + String(b);
+  b[hexLen] = '\0';
+  return String(ADMIN_TOKEN_PREFIX) + String(b);
 }
 
 bool isValidAdminTokenFormat(const String &v) {
-  if (!v.startsWith("ADM-")) return false;
-  if (v.length() != 68) return false;
-  for (int i = 4; i < (int)v.length(); i++) {
+  const size_t expectedLen = strlen(ADMIN_TOKEN_PREFIX) + (ADMIN_TOKEN_RANDOM_BYTES * 2);
+  if (!v.startsWith(ADMIN_TOKEN_PREFIX)) return false;
+  if (v.length() != expectedLen) return false;
+  for (size_t i = strlen(ADMIN_TOKEN_PREFIX); i < v.length(); i++) {
     char c = v[i];
     bool hexDigit = (c >= '0' && c <= '9') || (c >= 'A' && c <= 'F');
     if (!hexDigit) return false;
