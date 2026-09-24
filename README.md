@@ -65,7 +65,7 @@ Kalibrasi dirancang agar **tidak** salah menganggap komponen gravitasi X/Y sebag
 
 Recalibration web: tombol **CALIBRATE ZERO** pada `/admin?token=...`.
 
-> Catatan: kalibrasi manual dibuat blocking sementara (sesuai requirement), tetapi status kalibrasi tetap ditampilkan di UI/telemetry.
+Kalibrasi dijalankan sebagai state-machine asynchronous agar dashboard publik/API tidak freeze selama proses berlangsung. Progress/status muncul pada field calibration.
 
 ## Filtering untuk kapal (vessel-oriented)
 
@@ -103,12 +103,14 @@ Jika sensor hilang atau tidak sehat, sistem tetap berjalan (tidak crash), dashbo
 - SSID default: `SHIP-INCLINOMETER`
 - Password default: `ShipInclinometer`
 - AP IP: `192.168.4.1`
-- Token admin dibangkitkan saat boot (berbasis MAC)
+- Token admin dibangkitkan random, disimpan di NVS, dan dipakai ulang setelah reboot
 - Serial boot mencetak commissioning info sekali:
   - SSID
   - Password AP
   - AP IP
   - URL admin lengkap
+
+Untuk endpoint admin API, token dikirim melalui header `X-Admin-Token` (bukan query URL), kecuali akses awal ke halaman `/admin?token=...`.
 
 ## Cara compile & upload
 

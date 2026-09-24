@@ -9,6 +9,7 @@
 #include <Adafruit_MPU6050.h>
 #include <Adafruit_Sensor.h>
 #include <Adafruit_ADXL345_U.h>
+#include <esp_system.h>
 
 // =========================
 // Hardware pin configuration
@@ -115,6 +116,33 @@ struct CalibrationState {
 
 CalibrationState cal;
 
+enum CalibrationPhase : uint8_t {
+  CAL_IDLE = 0,
+  CAL_STILLNESS = 1,
+  CAL_SAMPLING = 2
+};
+
+struct CalibrationJob {
+  bool active = false;
+  CalibrationPhase phase = CAL_IDLE;
+  uint16_t sampleIndex = 0;
+  uint32_t nextSampleMs = 0;
+
+  float sumMpuNorm = 0, sumMpuNorm2 = 0;
+  float sumMpuGyro = 0, sumMpuGyro2 = 0;
+  uint16_t mpuStillN = 0;
+  float sumAdxlNorm = 0, sumAdxlNorm2 = 0;
+  uint16_t adxlStillN = 0;
+
+  float sumGx = 0, sumGy = 0, sumGz = 0;
+  float sumMpuAx = 0, sumMpuAy = 0, sumMpuAz = 0;
+  uint16_t mpuCalN = 0;
+  float sumAdxlAx = 0, sumAdxlAy = 0, sumAdxlAz = 0;
+  uint16_t adxlCalN = 0;
+};
+
+CalibrationJob calJob;
+
 struct StatusState {
   bool tftOk = false;
   bool wifiOk = false;
@@ -204,9 +232,19 @@ void updateOutputAngles() {
   if (!isfinite(outputPitchDeg) || fabsf(outputPitchDeg) > 180.0f) outputPitchDeg = 0.0f;
 }
 
-bool tokenOk() {
+bool tokenOkAdminPage() {
   if (!server.hasArg("token")) return false;
   return server.arg("token") == adminToken;
+}
+
+bool tokenOkApi() {
+  if (server.hasHeader("X-Admin-Token")) {
+    return server.header("X-Admin-Token") == adminToken;
+  }
+  if (server.method() == HTTP_POST && server.hasArg("token")) {
+    return server.arg("token") == adminToken;
+  }
+  return false;
 }
 
 void sanitizeConfig() {
@@ -416,135 +454,64 @@ void computeAnglesFromAccel(SensorState &s) {
   s.pitch = safeAtan2Deg(-s.axLpf, denom);
 }
 
-bool stillnessCheck(uint16_t samples, uint16_t sampleDelayMs) {
-  if (!mpuState.present && !adxlState.present) return false;
+void clearCalibrationJob() {
+  calJob = CalibrationJob();
+}
 
-  float sumMpuNorm = 0, sumMpuNorm2 = 0;
-  float sumMpuGyro = 0, sumMpuGyro2 = 0;
-  uint16_t mpuN = 0;
-
-  float sumAdxlNorm = 0, sumAdxlNorm2 = 0;
-  uint16_t adxlN = 0;
-
-  for (uint16_t i = 0; i < samples; i++) {
-    if (mpuState.present) {
-      sensors_event_t a, g, t;
-      mpu6050.getEvent(&a, &g, &t);
-      float ax = a.acceleration.x / 9.80665f;
-      float ay = a.acceleration.y / 9.80665f;
-      float az = a.acceleration.z / 9.80665f;
-      float norm = sqrtf(ax * ax + ay * ay + az * az);
-      float gyroMag = sqrtf(g.gyro.x * g.gyro.x + g.gyro.y * g.gyro.y + g.gyro.z * g.gyro.z) * DEG_PER_RAD;
-      if (isfinite(norm) && isfinite(gyroMag)) {
-        sumMpuNorm += norm;
-        sumMpuNorm2 += norm * norm;
-        sumMpuGyro += gyroMag;
-        sumMpuGyro2 += gyroMag * gyroMag;
-        mpuN++;
-      }
-    }
-
-    if (adxlState.present) {
-      sensors_event_t aev;
-      adxl345.getEvent(&aev);
-      float ax = aev.acceleration.x / 9.80665f;
-      float ay = aev.acceleration.y / 9.80665f;
-      float az = aev.acceleration.z / 9.80665f;
-      applyAdxlAxisMap(ax, ay, az, ax, ay, az);
-      float norm = sqrtf(ax * ax + ay * ay + az * az);
-      sumAdxlNorm += norm;
-      sumAdxlNorm2 += norm * norm;
-      adxlN++;
-    }
-
-    delay(sampleDelayMs);
+void beginCalibrationAsync() {
+  clearCalibrationJob();
+  if (!mpuState.present && !adxlState.present) {
+    sysState.calibrating = false;
+    sysState.calibrationMessage = "failed_no_sensor";
+    return;
   }
+  sysState.calibrating = true;
+  sysState.calibrationMessage = "checking_stillness";
+  calJob.active = true;
+  calJob.phase = CAL_STILLNESS;
+  calJob.nextSampleMs = millis();
+}
 
+bool evaluateStillnessAndAdvance() {
   bool ok = true;
-  if (mpuN > 6) {
-    float meanNorm = sumMpuNorm / mpuN;
-    float varNorm = fabsf((sumMpuNorm2 / mpuN) - (meanNorm * meanNorm));
-    float meanGyro = sumMpuGyro / mpuN;
-    float varGyro = fabsf((sumMpuGyro2 / mpuN) - (meanGyro * meanGyro));
+  if (calJob.mpuStillN > 6) {
+    float meanNorm = calJob.sumMpuNorm / calJob.mpuStillN;
+    float varNorm = fabsf((calJob.sumMpuNorm2 / calJob.mpuStillN) - (meanNorm * meanNorm));
+    float meanGyro = calJob.sumMpuGyro / calJob.mpuStillN;
+    float varGyro = fabsf((calJob.sumMpuGyro2 / calJob.mpuStillN) - (meanGyro * meanGyro));
     float stdNorm = sqrtf(varNorm);
     float rmsGyro = sqrtf(varGyro + meanGyro * meanGyro);
     ok &= (fabsf(meanNorm - 1.0f) < 0.15f) && (stdNorm < 0.03f) && (rmsGyro < 1.5f);
   }
-
-  if (adxlN > 6) {
-    float meanNorm = sumAdxlNorm / adxlN;
-    float varNorm = fabsf((sumAdxlNorm2 / adxlN) - (meanNorm * meanNorm));
+  if (calJob.adxlStillN > 6) {
+    float meanNorm = calJob.sumAdxlNorm / calJob.adxlStillN;
+    float varNorm = fabsf((calJob.sumAdxlNorm2 / calJob.adxlStillN) - (meanNorm * meanNorm));
     float stdNorm = sqrtf(varNorm);
     ok &= (fabsf(meanNorm - 1.0f) < 0.20f) && (stdNorm < 0.035f);
   }
-
-  return ok;
-}
-
-bool calibrateSensors() {
-  sysState.calibrating = true;
-  sysState.calibrationMessage = "checking_stillness";
-
-  if (!stillnessCheck(120, 10)) {
+  if (!ok) {
     sysState.calibrationMessage = "failed_motion_detected";
     sysState.calibrating = false;
+    clearCalibrationJob();
     return false;
   }
 
+  calJob.phase = CAL_SAMPLING;
+  calJob.sampleIndex = 0;
+  calJob.nextSampleMs = millis();
   sysState.calibrationMessage = "sampling_bias";
+  return true;
+}
 
-  float sumGx = 0, sumGy = 0, sumGz = 0;
-  float sumMpuAx = 0, sumMpuAy = 0, sumMpuAz = 0;
-  uint16_t mpuN = 0;
+void finalizeCalibration() {
+  if (calJob.mpuCalN > 0) {
+    cal.gyroBiasX = calJob.sumGx / calJob.mpuCalN;
+    cal.gyroBiasY = calJob.sumGy / calJob.mpuCalN;
+    cal.gyroBiasZ = calJob.sumGz / calJob.mpuCalN;
 
-  float sumAdxlAx = 0, sumAdxlAy = 0, sumAdxlAz = 0;
-  uint16_t adxlN = 0;
-
-  for (uint16_t i = 0; i < 250; i++) {
-    if (mpuState.present) {
-      sensors_event_t a, g, t;
-      mpu6050.getEvent(&a, &g, &t);
-      float ax = a.acceleration.x / 9.80665f;
-      float ay = a.acceleration.y / 9.80665f;
-      float az = a.acceleration.z / 9.80665f;
-      float gx = g.gyro.x * DEG_PER_RAD;
-      float gy = g.gyro.y * DEG_PER_RAD;
-      float gz = g.gyro.z * DEG_PER_RAD;
-      if (isfinite(ax) && isfinite(ay) && isfinite(az) && isfinite(gx) && isfinite(gy) && isfinite(gz)) {
-        sumMpuAx += ax;
-        sumMpuAy += ay;
-        sumMpuAz += az;
-        sumGx += gx;
-        sumGy += gy;
-        sumGz += gz;
-        mpuN++;
-      }
-    }
-
-    if (adxlState.present) {
-      sensors_event_t aev;
-      adxl345.getEvent(&aev);
-      float ax = aev.acceleration.x / 9.80665f;
-      float ay = aev.acceleration.y / 9.80665f;
-      float az = aev.acceleration.z / 9.80665f;
-      applyAdxlAxisMap(ax, ay, az, ax, ay, az);
-      sumAdxlAx += ax;
-      sumAdxlAy += ay;
-      sumAdxlAz += az;
-      adxlN++;
-    }
-
-    delay(6);
-  }
-
-  if (mpuN > 0) {
-    cal.gyroBiasX = sumGx / mpuN;
-    cal.gyroBiasY = sumGy / mpuN;
-    cal.gyroBiasZ = sumGz / mpuN;
-
-    cal.mpuGravityRefX = sumMpuAx / mpuN;
-    cal.mpuGravityRefY = sumMpuAy / mpuN;
-    cal.mpuGravityRefZ = sumMpuAz / mpuN;
+    cal.mpuGravityRefX = calJob.sumMpuAx / calJob.mpuCalN;
+    cal.mpuGravityRefY = calJob.sumMpuAy / calJob.mpuCalN;
+    cal.mpuGravityRefZ = calJob.sumMpuAz / calJob.mpuCalN;
 
     float rr = safeAtan2Deg(cal.mpuGravityRefY, cal.mpuGravityRefZ);
     float denom = sqrtf(cal.mpuGravityRefY * cal.mpuGravityRefY + cal.mpuGravityRefZ * cal.mpuGravityRefZ);
@@ -554,15 +521,15 @@ bool calibrateSensors() {
     cal.zeroPitchRef = pp;
   }
 
-  if (adxlN > 0) {
-    cal.adxlGravityRefX = sumAdxlAx / adxlN;
-    cal.adxlGravityRefY = sumAdxlAy / adxlN;
-    cal.adxlGravityRefZ = sumAdxlAz / adxlN;
+  if (calJob.adxlCalN > 0) {
+    cal.adxlGravityRefX = calJob.sumAdxlAx / calJob.adxlCalN;
+    cal.adxlGravityRefY = calJob.sumAdxlAy / calJob.adxlCalN;
+    cal.adxlGravityRefZ = calJob.sumAdxlAz / calJob.adxlCalN;
   }
 
   cal.adxlRollAlign = 0;
   cal.adxlPitchAlign = 0;
-  if (mpuN > 0 && adxlN > 0) {
+  if (calJob.mpuCalN > 0 && calJob.adxlCalN > 0) {
     float adxlRoll = safeAtan2Deg(cal.adxlGravityRefY, cal.adxlGravityRefZ);
     float denom = sqrtf(cal.adxlGravityRefY * cal.adxlGravityRefY + cal.adxlGravityRefZ * cal.adxlGravityRefZ);
     if (denom < 0.0001f) denom = 0.0001f;
@@ -579,10 +546,96 @@ bool calibrateSensors() {
 
   cal.calibrated = true;
   saveConfig();
-
+  updateOutputAngles();
   sysState.calibrationMessage = "ok";
   sysState.calibrating = false;
-  return true;
+  clearCalibrationJob();
+}
+
+void processCalibrationTask() {
+  if (!calJob.active) return;
+  if (millis() < calJob.nextSampleMs) return;
+
+  if (calJob.phase == CAL_STILLNESS) {
+    if (mpuState.present) {
+      sensors_event_t a, g, t;
+      mpu6050.getEvent(&a, &g, &t);
+      float ax = a.acceleration.x / 9.80665f;
+      float ay = a.acceleration.y / 9.80665f;
+      float az = a.acceleration.z / 9.80665f;
+      float norm = sqrtf(ax * ax + ay * ay + az * az);
+      float gyroMag = sqrtf(g.gyro.x * g.gyro.x + g.gyro.y * g.gyro.y + g.gyro.z * g.gyro.z) * DEG_PER_RAD;
+      if (isfinite(norm) && isfinite(gyroMag)) {
+        calJob.sumMpuNorm += norm;
+        calJob.sumMpuNorm2 += norm * norm;
+        calJob.sumMpuGyro += gyroMag;
+        calJob.sumMpuGyro2 += gyroMag * gyroMag;
+        calJob.mpuStillN++;
+      }
+    }
+    if (adxlState.present) {
+      sensors_event_t aev;
+      adxl345.getEvent(&aev);
+      float ax = aev.acceleration.x / 9.80665f;
+      float ay = aev.acceleration.y / 9.80665f;
+      float az = aev.acceleration.z / 9.80665f;
+      applyAdxlAxisMap(ax, ay, az, ax, ay, az);
+      float norm = sqrtf(ax * ax + ay * ay + az * az);
+      if (isfinite(norm)) {
+        calJob.sumAdxlNorm += norm;
+        calJob.sumAdxlNorm2 += norm * norm;
+        calJob.adxlStillN++;
+      }
+    }
+    calJob.sampleIndex++;
+    calJob.nextSampleMs = millis() + 10;
+    if (calJob.sampleIndex >= 120) {
+      evaluateStillnessAndAdvance();
+    }
+    return;
+  }
+
+  if (calJob.phase == CAL_SAMPLING) {
+    if (mpuState.present) {
+      sensors_event_t a, g, t;
+      mpu6050.getEvent(&a, &g, &t);
+      float ax = a.acceleration.x / 9.80665f;
+      float ay = a.acceleration.y / 9.80665f;
+      float az = a.acceleration.z / 9.80665f;
+      float gx = g.gyro.x * DEG_PER_RAD;
+      float gy = g.gyro.y * DEG_PER_RAD;
+      float gz = g.gyro.z * DEG_PER_RAD;
+      if (isfinite(ax) && isfinite(ay) && isfinite(az) && isfinite(gx) && isfinite(gy) && isfinite(gz)) {
+        calJob.sumMpuAx += ax;
+        calJob.sumMpuAy += ay;
+        calJob.sumMpuAz += az;
+        calJob.sumGx += gx;
+        calJob.sumGy += gy;
+        calJob.sumGz += gz;
+        calJob.mpuCalN++;
+      }
+    }
+    if (adxlState.present) {
+      sensors_event_t aev;
+      adxl345.getEvent(&aev);
+      float ax = aev.acceleration.x / 9.80665f;
+      float ay = aev.acceleration.y / 9.80665f;
+      float az = aev.acceleration.z / 9.80665f;
+      applyAdxlAxisMap(ax, ay, az, ax, ay, az);
+      if (isfinite(ax) && isfinite(ay) && isfinite(az)) {
+        calJob.sumAdxlAx += ax;
+        calJob.sumAdxlAy += ay;
+        calJob.sumAdxlAz += az;
+        calJob.adxlCalN++;
+      }
+    }
+    calJob.sampleIndex++;
+    calJob.nextSampleMs = millis() + 6;
+    if (calJob.sampleIndex >= 250) {
+      finalizeCalibration();
+    }
+    return;
+  }
 }
 
 void readSensorsTask() {
@@ -712,7 +765,9 @@ void serialTask() {
 }
 
 String basePageHtml(bool adminMode) {
-  String h = F(
+  String h;
+  h.reserve(9000);
+  h += F(
       "<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
       "<title>Ship Inclinometer</title><style>"
       "body{margin:0;background:#0b1220;color:#e6edf7;font-family:Arial,sans-serif}"
@@ -773,13 +828,13 @@ String basePageHtml(bool adminMode) {
          "q('upd').textContent='Updated '+new Date(d.system.updated_ms).toLocaleTimeString();"
          "const dot=q('statusDot');dot.className=(d.system.status.includes('DANGER')||d.system.status.includes('ERROR'))?'danger':(d.system.status.includes('WARNING')?'warn':'ok');"
          "dot.textContent=d.system.status;}catch(e){q('upd').textContent='update failed';}}"
-         "async function loadSettings(){if(!admin) return;const r=await fetch('/api/settings?token='+encodeURIComponent(token));if(!r.ok) return;const d=await r.json();"
+         "async function loadSettings(){if(!admin||!token) return;const r=await fetch('/api/settings',{headers:{'X-Admin-Token':token}});if(!r.ok) return;const d=await r.json();"
          "for(const k of ['rollWarning','rollDanger','pitchWarning','pitchDanger','sensorDiffWarning','compBaseGain','accelLpfAlpha','linearAccelRejectG']){if(q(k)) q(k).value=d[k];}"
          "q('adxlAxis').value=[d.adxlAxis.x,d.adxlAxis.y,d.adxlAxis.z].join(',');q('adxlSign').value=[d.adxlAxis.sx,d.adxlAxis.sy,d.adxlAxis.sz].join(',');}"
          "async function saveSettings(){if(!admin) return;const p=new URLSearchParams({token,rollWarning:q('rollWarning').value,rollDanger:q('rollDanger').value,pitchWarning:q('pitchWarning').value,pitchDanger:q('pitchDanger').value,sensorDiffWarning:q('sensorDiffWarning').value,compBaseGain:q('compBaseGain').value,accelLpfAlpha:q('accelLpfAlpha').value,linearAccelRejectG:q('linearAccelRejectG').value,adxlAxis:q('adxlAxis').value,adxlSign:q('adxlSign').value});"
-         "const r=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:p});q('adminMsg').textContent=await r.text();}"
-         "async function recalibrate(){if(!admin) return;q('adminMsg').textContent='Calibration in progress... keep vessel still';const p=new URLSearchParams({token});const r=await fetch('/api/calibrate',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:p});q('adminMsg').textContent=await r.text();}"
-         "async function resetDefaults(){if(!admin) return;const p=new URLSearchParams({token});const r=await fetch('/api/reset',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:p});q('adminMsg').textContent=await r.text();loadSettings();}"
+         "const r=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded','X-Admin-Token':token},body:p});q('adminMsg').textContent=await r.text();}"
+         "async function recalibrate(){if(!admin||!token) return;q('adminMsg').textContent='Calibration in progress... keep vessel still';const r=await fetch('/api/calibrate',{method:'POST',headers:{'X-Admin-Token':token}});q('adminMsg').textContent=await r.text();}"
+         "async function resetDefaults(){if(!admin||!token) return;const r=await fetch('/api/reset',{method:'POST',headers:{'X-Admin-Token':token}});q('adminMsg').textContent=await r.text();loadSettings();}"
          "updateData();setInterval(updateData," );
   h += String(cfg.webMs);
   h += F(");loadSettings();</script></body></html>");
@@ -800,7 +855,9 @@ String buildDataJson() {
     diffPitch = fabsf(mpuState.pitch - adxlState.pitch);
   }
 
-  String j = "{";
+  String j;
+  j.reserve(1400);
+  j = "{";
   j += "\"roll\":" + fmtf(outputRollDeg, 3);
   j += ",\"pitch\":" + fmtf(outputPitchDeg, 3);
   j += ",\"roll_direction\":\"" + rollDirection(outputRollDeg) + "\"";
@@ -841,7 +898,7 @@ void handleRoot() {
 }
 
 void handleAdmin() {
-  if (!tokenOk()) {
+  if (!tokenOkAdminPage()) {
     server.send(401, "text/plain", "Admin token required: /admin?token=...");
     return;
   }
@@ -853,7 +910,7 @@ void handleData() {
 }
 
 void handleSettingsGet() {
-  if (!tokenOk()) {
+  if (!tokenOkApi()) {
     server.send(401, "application/json", "{\"error\":\"unauthorized\"}");
     return;
   }
@@ -901,7 +958,7 @@ void parseAxisArgs() {
 }
 
 void handleSettingsPost() {
-  if (!tokenOk()) {
+  if (!tokenOkApi()) {
     server.send(401, "text/plain", "unauthorized");
     return;
   }
@@ -922,16 +979,20 @@ void handleSettingsPost() {
 }
 
 void handleCalibrate() {
-  if (!tokenOk()) {
+  if (!tokenOkApi()) {
     server.send(401, "text/plain", "unauthorized");
     return;
   }
-  bool ok = calibrateSensors();
-  server.send(ok ? 200 : 409, "text/plain", ok ? "calibration ok" : "calibration failed: keep vessel still");
+  if (calJob.active) {
+    server.send(202, "text/plain", "calibration already in progress");
+    return;
+  }
+  beginCalibrationAsync();
+  server.send(202, "text/plain", "calibration started");
 }
 
 void handleReset() {
-  if (!tokenOk()) {
+  if (!tokenOkApi()) {
     server.send(401, "text/plain", "unauthorized");
     return;
   }
@@ -940,6 +1001,9 @@ void handleReset() {
 }
 
 void initWebServer() {
+  const char *headerKeys[] = {"X-Admin-Token"};
+  server.collectHeaders(headerKeys, 1);
+
   server.on("/", HTTP_GET, handleRoot);
   server.on("/admin", HTTP_GET, handleAdmin);
   server.on("/api/data", HTTP_GET, handleData);
@@ -974,21 +1038,35 @@ void printBootInfo() {
   }
 }
 
+String randomToken() {
+  char b[33];
+  for (uint8_t i = 0; i < 16; i++) {
+    uint8_t r = (uint8_t)(esp_random() & 0xFF);
+    snprintf(&b[i * 2], 3, "%02X", r);
+  }
+  b[32] = '\0';
+  return String("ADM-") + String(b);
+}
+
+void loadOrCreateAdminToken() {
+  prefs.begin(PREF_NS, false);
+  String stored = prefs.getString("adminToken", "");
+  if (stored.length() < 12) {
+    stored = randomToken();
+    prefs.putString("adminToken", stored);
+  }
+  adminToken = stored;
+  showCommissioningSecrets = !prefs.getBool("commissioned", false);
+  prefs.end();
+}
+
 void setup() {
   Serial.begin(115200);
   delay(100);
 
   sysState.bootMs = millis();
   loadConfig();
-
-  uint64_t mac = ESP.getEfuseMac();
-  char tokenBuf[24];
-  snprintf(tokenBuf, sizeof(tokenBuf), "ADM-%06llX", (unsigned long long)(mac & 0xFFFFFFULL));
-  adminToken = String(tokenBuf);
-
-  prefs.begin(PREF_NS, true);
-  showCommissioningSecrets = !prefs.getBool("commissioned", false);
-  prefs.end();
+  loadOrCreateAdminToken();
 
   initSensors();
   initDisplay();
@@ -1003,7 +1081,7 @@ void setup() {
   lastFilterMicros = micros();
 
   if (cfg.startupCalibration && (mpuState.present || adxlState.present)) {
-    calibrateSensors();
+    beginCalibrationAsync();
   } else {
     sysState.calibrationMessage = "skipped";
   }
@@ -1017,6 +1095,7 @@ void loop() {
   uint32_t now = millis();
 
   server.handleClient();
+  processCalibrationTask();
 
   if (now - lastSensorMs >= cfg.sensorMs) {
     lastSensorMs = now;
