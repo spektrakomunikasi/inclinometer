@@ -253,7 +253,6 @@ bool originAllowed() {
   if (origin.length() == 0) return false;
   String ipOrigin = String("http://") + WiFi.softAPIP().toString();
   if (origin == ipOrigin || origin == ipOrigin + "/") return true;
-  if (origin == String("http://") + cfg.apSsid || origin == String("http://") + cfg.apSsid + "/") return true;
   return false;
 }
 

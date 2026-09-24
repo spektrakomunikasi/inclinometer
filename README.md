@@ -110,7 +110,11 @@ Jika sensor hilang atau tidak sehat, sistem tetap berjalan (tidak crash), dashbo
   - AP IP
   - URL admin lengkap
 
-Untuk endpoint admin API, token dikirim melalui header `X-Admin-Token` (bukan query URL), kecuali akses awal ke halaman `/admin?token=...`.
+Untuk endpoint admin API, request wajib:
+- header `X-Admin-Token` yang valid
+- header `Origin` yang valid untuk origin device (`http://192.168.4.1`)
+
+Token query URL hanya dipakai untuk akses awal ke halaman `/admin?token=...`.
 
 ## Cara compile & upload
 
