@@ -300,9 +300,10 @@ bool tokenOkApi() {
 }
 
 bool originAllowed() {
-  if (!server.hasHeader("Origin")) return false;
+  if (!server.hasHeader("Origin")) return true;
   String origin = server.header("Origin");
   origin.trim();
+  if (origin.length() == 0) return true;
   origin.toLowerCase();
   if (!origin.startsWith("http://")) return false;
   String hostPort = origin.substring(7);
@@ -618,6 +619,8 @@ void finalizeCalibration() {
   }
 
   cal.calibrated = true;
+  fusedRoll = cal.zeroRollRef;
+  fusedPitch = cal.zeroPitchRef;
   saveConfig();
   updateOutputAngles();
   sysState.calibrationMessage = "ok";
@@ -902,7 +905,7 @@ String basePageHtml(bool adminMode) {
          "q('statusTxt').textContent=d.system.status;q('calibTxt').textContent=d.system.calibration;"
          "q('ssidTxt').textContent=d.network.ssid;q('ipTxt').textContent=d.network.ip;"
          "q('uptimeTxt').textContent=d.system.uptime;q('clientsTxt').textContent=d.network.clients;"
-         "q('upd').textContent='Updated '+new Date(d.system.updated_ms).toLocaleTimeString();"
+         "q('upd').textContent='Updated (uptime '+d.system.uptime+')';"
          "const dot=q('statusDot');dot.className=(d.system.status.includes('DANGER')||d.system.status.includes('ERROR'))?'danger':(d.system.status.includes('WARNING')?'warn':'ok');"
          "dot.textContent=d.system.status;}catch(e){q('upd').textContent='update failed';}}"
          "async function loadSettings(){if(!admin||!token) return;const r=await fetch('/api/settings',{headers:{'X-Admin-Token':token}});if(!r.ok) return;const d=await r.json();"
@@ -1176,15 +1179,7 @@ String randomToken() {
   return String(ADMIN_TOKEN_PREFIX) + String(b);
 }
 
-bool isValidAdminTokenFormat(const String &v) {
-  // Persisted token formats:
-  // - current: ADMIN_TOKEN_PREFIX + (2 * ADMIN_TOKEN_RANDOM_BYTES) uppercase hex chars
-  // - legacy:  ADMIN_TOKEN_PREFIX + 32 uppercase hex chars
-  const size_t prefixLen = strlen(ADMIN_TOKEN_PREFIX);
-  const size_t expectedLen = prefixLen + (ADMIN_TOKEN_RANDOM_BYTES * 2);
-  const size_t legacyLen = prefixLen + 32;
-  if (!v.startsWith(ADMIN_TOKEN_PREFIX)) return false;
-  if (v.length() != expectedLen && v.length() != legacyLen) return false;
+bool isHexSuffix(const String &v, size_t prefixLen) {
   for (size_t i = prefixLen; i < v.length(); i++) {
     char c = v[i];
     bool hexDigit = (c >= '0' && c <= '9') || (c >= 'A' && c <= 'F');
@@ -1193,16 +1188,36 @@ bool isValidAdminTokenFormat(const String &v) {
   return true;
 }
 
+bool isCurrentAdminTokenFormat(const String &v) {
+  const size_t prefixLen = strlen(ADMIN_TOKEN_PREFIX);
+  const size_t expectedLen = prefixLen + (ADMIN_TOKEN_RANDOM_BYTES * 2);
+  if (!v.startsWith(ADMIN_TOKEN_PREFIX)) return false;
+  if (v.length() != expectedLen) return false;
+  return isHexSuffix(v, prefixLen);
+}
+
+bool isLegacyAdminTokenFormat(const String &v) {
+  const size_t prefixLen = strlen(ADMIN_TOKEN_PREFIX);
+  if (!v.startsWith(ADMIN_TOKEN_PREFIX)) return false;
+  if (v.length() != prefixLen + 32) return false;
+  return isHexSuffix(v, prefixLen);
+}
+
 void loadOrCreateAdminToken() {
   prefs.begin(PREF_NS, true);
   String stored = prefs.getString("adminToken", "");
   showCommissioningSecrets = !prefs.getBool("commissioned", false);
   prefs.end();
 
-  if (!isValidAdminTokenFormat(stored)) {
+  bool legacyToken = isLegacyAdminTokenFormat(stored);
+  if (!isCurrentAdminTokenFormat(stored)) {
     stored = randomToken();
     prefs.begin(PREF_NS, false);
     prefs.putString("adminToken", stored);
+    if (legacyToken) {
+      prefs.putBool("commissioned", false);
+      showCommissioningSecrets = true;
+    }
     prefs.end();
   }
   adminToken = stored;
