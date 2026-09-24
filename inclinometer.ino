@@ -641,6 +641,16 @@ void checkAlarm() {
 }
 
 void drawGauge(int16_t x, int16_t y, int16_t w, int16_t h, float value, float warn, float danger, bool force = false) {
+  if (danger <= 0.01f) {
+    danger = 1.0f;
+  }
+  if (warn < 0) {
+    warn = 0;
+  }
+  if (warn > danger) {
+    warn = danger;
+  }
+
   if (force) {
     tft->drawRect(x, y, w, h, ILI9341_DARKGREY);
   }
@@ -887,8 +897,7 @@ bool isAuthorized() {
   if (!server.hasHeader("X-Admin-Token")) {
     return false;
   }
-  String token = server.header("X-Admin-Token");
-  return token == adminToken || token == apPassword;
+  return server.header("X-Admin-Token") == adminToken;
 }
 
 bool tryParseFloatArg(const char *name, float &outValue) {
@@ -943,9 +952,7 @@ void handleAdmin() {
 }
 
 void handleData() {
-  if (webDataCache == "{}") {
-    updateWebData();
-  }
+  updateWebData();
   server.send(200, "application/json", webDataCache);
 }
 
@@ -1015,6 +1022,10 @@ String buildDataJson() {
 }
 
 void handleSettingsGet() {
+  if (!isAuthorized()) {
+    server.send(401, "application/json", "{\"ok\":false,\"reason\":\"unauthorized\"}");
+    return;
+  }
   String json = "{";
   json += "\"rollWarning\":" + String(cfg.rollWarning, 2) + ",";
   json += "\"rollDanger\":" + String(cfg.rollDanger, 2) + ",";
@@ -1034,39 +1045,27 @@ void handleSettingsPost() {
     return;
   }
 
-  float rollWarning = cfg.rollWarning;
-  float rollDanger = cfg.rollDanger;
-  float pitchWarning = cfg.pitchWarning;
-  float pitchDanger = cfg.pitchDanger;
-  float diffThreshold = cfg.diffThreshold;
-  float alpha = cfg.complementaryAlpha;
-  uint16_t webUpdateMs = cfg.webUpdateIntervalMs;
+  RuntimeConfig nextCfg = cfg;
+  String nextApPassword = apPassword;
+  String nextAdminToken = adminToken;
 
-  if (!tryParseFloatArg("rollWarning", rollWarning) ||
-      !tryParseFloatArg("rollDanger", rollDanger) ||
-      !tryParseFloatArg("pitchWarning", pitchWarning) ||
-      !tryParseFloatArg("pitchDanger", pitchDanger) ||
-      !tryParseFloatArg("diffThreshold", diffThreshold) ||
-      !tryParseFloatArg("alpha", alpha) ||
-      !tryParseUIntArg("webUpdateMs", webUpdateMs)) {
+  if (!tryParseFloatArg("rollWarning", nextCfg.rollWarning) ||
+      !tryParseFloatArg("rollDanger", nextCfg.rollDanger) ||
+      !tryParseFloatArg("pitchWarning", nextCfg.pitchWarning) ||
+      !tryParseFloatArg("pitchDanger", nextCfg.pitchDanger) ||
+      !tryParseFloatArg("diffThreshold", nextCfg.diffThreshold) ||
+      !tryParseFloatArg("alpha", nextCfg.complementaryAlpha) ||
+      !tryParseUIntArg("webUpdateMs", nextCfg.webUpdateIntervalMs)) {
     server.send(400, "application/json", "{\"ok\":false,\"reason\":\"invalid_numeric_input\"}");
     return;
   }
 
-  cfg.rollWarning = rollWarning;
-  cfg.rollDanger = rollDanger;
-  cfg.pitchWarning = pitchWarning;
-  cfg.pitchDanger = pitchDanger;
-  cfg.diffThreshold = diffThreshold;
-  cfg.complementaryAlpha = alpha;
-  cfg.webUpdateIntervalMs = webUpdateMs;
-  cfg.startupCalibration = server.hasArg("startupCalibration") ? (server.arg("startupCalibration") == "1") : cfg.startupCalibration;
+  nextCfg.startupCalibration = server.hasArg("startupCalibration") ? (server.arg("startupCalibration") == "1") : nextCfg.startupCalibration;
 
-  String oldApPassword = apPassword;
   if (server.hasArg("apPassword")) {
     String p = server.arg("apPassword");
     if (p.length() >= 8 && p.length() <= 63) {
-      apPassword = p;
+      nextApPassword = p;
     } else if (p.length() > 0) {
       server.send(400, "application/json", "{\"ok\":false,\"reason\":\"invalid_ap_password_length\"}");
       return;
@@ -1075,20 +1074,18 @@ void handleSettingsPost() {
   if (server.hasArg("newAdminToken")) {
     String p = server.arg("newAdminToken");
     if (p.length() >= 8 && p.length() <= 63) {
-      adminToken = p;
+      nextAdminToken = p;
     } else if (p.length() > 0) {
       server.send(400, "application/json", "{\"ok\":false,\"reason\":\"invalid_admin_token_length\"}");
       return;
     }
   }
 
-  cfg.rollWarning = fmaxf(0.1f, cfg.rollWarning);
-  cfg.rollDanger = fmaxf(cfg.rollWarning + 0.1f, cfg.rollDanger);
-  cfg.pitchWarning = fmaxf(0.1f, cfg.pitchWarning);
-  cfg.pitchDanger = fmaxf(cfg.pitchWarning + 0.1f, cfg.pitchDanger);
-  cfg.diffThreshold = fmaxf(0.1f, cfg.diffThreshold);
-  cfg.complementaryAlpha = constrain(cfg.complementaryAlpha, 0.70f, 0.995f);
-  cfg.webUpdateIntervalMs = constrain(cfg.webUpdateIntervalMs, (uint16_t)100, (uint16_t)1000);
+  String oldApPassword = apPassword;
+  cfg = nextCfg;
+  apPassword = nextApPassword;
+  adminToken = nextAdminToken;
+  applyConfigConstraints();
 
   if (apPassword != oldApPassword) {
     wifiApHealthy = applyAccessPointConfig();
@@ -1248,7 +1245,7 @@ function setStatusColor(text){
 function kv(entries){return entries.map(([k,v])=>`<div class="kv"><span>${k}</span><b>${v}</b></div>`).join('');}
 
 async function loadSettings(){
-  const r=await fetch('/api/settings'); const j=await r.json();
+  const r=await fetch('/api/settings',{headers:{'X-Admin-Token':byId('adminToken').value||''}}); const j=await r.json();
   for(const k of Object.keys(j)){
     const el=byId(k);
     if(!el) continue;
