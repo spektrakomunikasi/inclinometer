@@ -436,16 +436,13 @@ bool calibrateSensors() {
   sysData.calibrating = true;
   updateTFT(true);
 
-  if (mpu.detected) {
-    if (!sensorsAreStill(120)) {
-      sysData.calibrating = false;
-      return false;
-    }
-  } else if (adxl.detected) {
-    if (!adxlIsStill(120)) {
-      sysData.calibrating = false;
-      return false;
-    }
+  if (mpu.detected && !sensorsAreStill(120)) {
+    sysData.calibrating = false;
+    return false;
+  }
+  if (adxl.detected && !adxlIsStill(120)) {
+    sysData.calibrating = false;
+    return false;
   }
 
   const uint16_t samples = 250;
@@ -902,7 +899,13 @@ bool tryParseUIntArg(const char *name, uint16_t &outValue) {
 }
 
 void applyConfigConstraints() {
-  applyConfigConstraints();
+  cfg.rollWarning = fmaxf(0.1f, cfg.rollWarning);
+  cfg.rollDanger = fmaxf(cfg.rollWarning + 0.1f, cfg.rollDanger);
+  cfg.pitchWarning = fmaxf(0.1f, cfg.pitchWarning);
+  cfg.pitchDanger = fmaxf(cfg.pitchWarning + 0.1f, cfg.pitchDanger);
+  cfg.diffThreshold = fmaxf(0.1f, cfg.diffThreshold);
+  cfg.complementaryAlpha = constrain(cfg.complementaryAlpha, 0.70f, 0.995f);
+  cfg.webUpdateIntervalMs = constrain(cfg.webUpdateIntervalMs, (uint16_t)100, (uint16_t)1000);
 }
 
 void handleRoot() {

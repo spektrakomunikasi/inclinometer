@@ -128,7 +128,7 @@ Arsitektur non-blocking berbasis `millis()` dengan task terpisah:
 - serial update rate
 - web update rate (via polling endpoint)
 
-Catatan: proses **kalibrasi** (startup/manual) melakukan sampling beruntun dan bersifat blocking sementara sampai selesai.
+Catatan: proses **kalibrasi** (startup/manual) melakukan sampling beruntun dan bersifat blocking sementara sampai selesai, sehingga selama kalibrasi request HTTP/dashboard dan task periodik utama akan tertunda sesaat.
 
 ## 12) Status sistem
 Status utama:
