@@ -207,6 +207,7 @@ String jsonEscape(const String &input);
 bool isAuthorized();
 bool tryParseFloatArg(const char *name, float &outValue);
 bool tryParseUIntArg(const char *name, uint16_t &outValue);
+void applyConfigConstraints();
 void handleRoot();
 void handleAdmin();
 void handleData();
@@ -369,36 +370,6 @@ bool sensorsAreStill(uint16_t samples) {
     return false;
   }
 
-  bool adxlIsStill(uint16_t samples) {
-    if (!adxl.detected) {
-      return false;
-    }
-
-    float peakDeviationG = 0.0f;
-    float peakStepG = 0.0f;
-    float prevNormG = 1.0f;
-
-    for (uint16_t i = 0; i < samples; i++) {
-      sensors_event_t e;
-      adxl345.getEvent(&e);
-
-      float norm = sqrtf(e.acceleration.x * e.acceleration.x +
-                         e.acceleration.y * e.acceleration.y +
-                         e.acceleration.z * e.acceleration.z);
-      float normG = norm / 9.80665f;
-      float deviation = fabsf(normG - 1.0f);
-      peakDeviationG = fmaxf(peakDeviationG, deviation);
-
-      if (i > 0) {
-        peakStepG = fmaxf(peakStepG, fabsf(normG - prevNormG));
-      }
-      prevNormG = normG;
-      yield();
-    }
-
-    return peakDeviationG < 0.08f && peakStepG < 0.04f;
-  }
-
   float gyroPeak = 0.0f;
   float accNormPeak = 0.0f;
 
@@ -425,6 +396,36 @@ bool sensorsAreStill(uint16_t samples) {
   }
 
   return gyroPeak < 2.0f && accNormPeak < 0.08f;
+}
+
+bool adxlIsStill(uint16_t samples) {
+  if (!adxl.detected) {
+    return false;
+  }
+
+  float peakDeviationG = 0.0f;
+  float peakStepG = 0.0f;
+  float prevNormG = 1.0f;
+
+  for (uint16_t i = 0; i < samples; i++) {
+    sensors_event_t e;
+    adxl345.getEvent(&e);
+
+    float norm = sqrtf(e.acceleration.x * e.acceleration.x +
+                       e.acceleration.y * e.acceleration.y +
+                       e.acceleration.z * e.acceleration.z);
+    float normG = norm / 9.80665f;
+    float deviation = fabsf(normG - 1.0f);
+    peakDeviationG = fmaxf(peakDeviationG, deviation);
+
+    if (i > 0) {
+      peakStepG = fmaxf(peakStepG, fabsf(normG - prevNormG));
+    }
+    prevNormG = normG;
+    yield();
+  }
+
+  return peakDeviationG < 0.08f && peakStepG < 0.04f;
 }
 
 bool calibrateSensors() {
@@ -818,8 +819,7 @@ void loadSettings() {
     adminToken = defaultAdminToken;
   }
 
-  cfg.complementaryAlpha = constrain(cfg.complementaryAlpha, 0.70f, 0.995f);
-  cfg.webUpdateIntervalMs = constrain(cfg.webUpdateIntervalMs, (uint16_t)100, (uint16_t)1000);
+  applyConfigConstraints();
 }
 
 void saveSettings() {
@@ -901,11 +901,19 @@ bool tryParseUIntArg(const char *name, uint16_t &outValue) {
   return true;
 }
 
+void applyConfigConstraints() {
+  applyConfigConstraints();
+}
+
 void handleRoot() {
   server.send(200, "text/html", webHtml(false));
 }
 
 void handleAdmin() {
+  if (!server.hasArg("token") || server.arg("token") != adminToken) {
+    server.send(401, "text/plain", "Unauthorized. Open /admin?token=<admin-token>");
+    return;
+  }
   server.send(200, "text/html", webHtml(true));
 }
 
@@ -1294,7 +1302,7 @@ if(hasAdmin){
     int end = html.indexOf("<!--ADMIN-END-->");
     if (start >= 0 && end > start) {
       end += String("<!--ADMIN-END-->").length();
-      String replacement = "<div class=\"card\" style=\"margin-top:12px\"><h3>SETTINGS</h3><div class=\"small\">Read-only page. Open <b>/admin</b> to access configuration controls.</div></div>";
+      String replacement = "<div class=\"card\" style=\"margin-top:12px\"><h3>SETTINGS</h3><div class=\"small\">Read-only page. Open <b>/admin?token=&lt;admin-token&gt;</b> to access configuration controls.</div></div>";
       html = html.substring(0, start) + replacement + html.substring(end);
     }
   }

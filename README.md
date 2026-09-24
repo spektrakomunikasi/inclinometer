@@ -77,7 +77,7 @@ Default:
 ## 8) Cara membuka web dashboard
 1. Hubungkan HP/laptop ke Wi-Fi AP: `SHIP-INCLINOMETER`.
 2. Buka browser ke: `http://192.168.4.1` untuk dashboard telemetry (read-only).
-3. Untuk konfigurasi, buka: `http://192.168.4.1/admin` lalu masukkan admin token.
+3. Untuk konfigurasi, buka: `http://192.168.4.1/admin?token=<admin-token>`.
 4. Dashboard update realtime (polling JSON) tanpa internet/cloud.
 
 ## 9) Kalibrasi
@@ -127,6 +127,8 @@ Arsitektur non-blocking berbasis `millis()` dengan task terpisah:
 - TFT refresh rate
 - serial update rate
 - web update rate (via polling endpoint)
+
+Catatan: proses **kalibrasi** (startup/manual) melakukan sampling beruntun dan bersifat blocking sementara sampai selesai.
 
 ## 12) Status sistem
 Status utama:
