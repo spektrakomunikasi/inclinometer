@@ -6,7 +6,7 @@ Sketch Arduino IDE untuk ESP32 dengan:
 - TFT ILI9341 320x240 (SPI)
 - Dashboard web lokal via ESP32 Access Point (`192.168.4.1`)
 
-File utama: `/home/runner/work/inclinometer/inclinometer/inclinometer.ino`
+File utama: `inclinometer.ino`
 
 ## Fitur utama
 
@@ -18,7 +18,7 @@ File utama: `/home/runner/work/inclinometer/inclinometer/inclinometer.ino`
   - Informasi jaringan, uptime, update indicator
 - Panel **admin/settings** hanya di `/admin?token=...`
 - API data publik: `GET /api/data`
-- API settings aman (wajib token), dan **token admin tidak pernah dikembalikan** dari API settings
+- API admin (`/api/settings`, `/api/calibrate`, `/api/reset`) aman via sesi login `/admin?token=...` (IP client + nonce sesi + timeout) dan **token admin tidak pernah dikembalikan** dari API settings
 - AP statik: `192.168.4.1`
 - Preferences/NVS untuk penyimpanan konfigurasi + data kalibrasi
 
@@ -103,12 +103,14 @@ Jika sensor hilang atau tidak sehat, sistem tetap berjalan (tidak crash), dashbo
 - SSID default: `SHIP-INCLINOMETER`
 - Password default: `ShipInclinometer`
 - AP IP: `192.168.4.1`
-- Token admin dibangkitkan saat boot (berbasis MAC)
+- Token admin dibangkitkan saat boot (random, untuk commissioning)
 - Serial boot mencetak commissioning info sekali:
   - SSID
-  - Password AP
   - AP IP
-  - URL admin lengkap
+  - Admin path (`/admin`)
+  - Password AP + admin token commissioning (saat `PRINT_COMMISSIONING_SECRETS=true`)
+- Jika ingin menonaktifkan pencetakan secret commissioning ke Serial pada build produksi, ubah `PRINT_COMMISSIONING_SECRETS` menjadi `false`.
+- Token dipakai saat login awal ke `/admin?token=...`; setelah itu API admin memakai sesi login yang terikat ke IP client, nonce sesi, dan timeout
 
 ## Cara compile & upload
 
@@ -121,6 +123,7 @@ Jika sensor hilang atau tidak sehat, sistem tetap berjalan (tidak crash), dashbo
 7. Buka:
    - Public dashboard: `http://192.168.4.1/`
    - Admin/settings: `http://192.168.4.1/admin?token=...`
+   - Setelah login admin, aksi settings/calibration/reset memakai sesi login yang sama (berbasis IP + timeout)
 
 ## Arsitektur loop non-blocking
 

@@ -9,6 +9,8 @@
 #include <Adafruit_MPU6050.h>
 #include <Adafruit_Sensor.h>
 #include <Adafruit_ADXL345_U.h>
+#include <ctype.h>
+#include <type_traits>
 
 // =========================
 // Hardware pin configuration
@@ -35,6 +37,9 @@ Preferences prefs;
 
 static const char *PREF_NS = "inclino";
 static const float DEG_PER_RAD = 57.2957795131f;
+static const bool PRINT_COMMISSIONING_SECRETS = true;
+static const uint8_t MPU6050_I2C_ADDR = 0x68;
+static const uint8_t ADXL345_I2C_ADDR = 0x53;
 
 // =========================
 // Config
@@ -114,6 +119,11 @@ struct CalibrationState {
 };
 
 CalibrationState cal;
+struct PersistState {
+  Config cfg;
+  CalibrationState cal;
+};
+static_assert(std::is_trivially_copyable<PersistState>::value, "PersistState must remain trivially copyable for NVS putBytes/getBytes");
 
 struct StatusState {
   bool tftOk = false;
@@ -128,6 +138,10 @@ struct StatusState {
 StatusState sysState;
 
 String adminToken;
+IPAddress adminSessionIp(0, 0, 0, 0);
+uint32_t adminSessionStartMs = 0;
+bool adminSessionActive = false;
+String adminSessionSecret;
 
 float fusedRoll = 0.0f;
 float fusedPitch = 0.0f;
@@ -138,6 +152,8 @@ uint32_t lastTftMs = 0;
 uint32_t lastSerialMs = 0;
 uint32_t lastWebFrameMs = 0;
 uint32_t lastFilterMicros = 0;
+
+String hex8Upper(uint32_t v);
 
 float safeAtan2Deg(float y, float x) {
   float v = atan2f(y, x) * DEG_PER_RAD;
@@ -156,6 +172,39 @@ float clampf(float v, float lo, float hi) {
 String fmtf(float v, uint8_t p = 2) {
   if (!isfinite(v)) v = 0.0f;
   return String(v, p);
+}
+
+String jsonEscape(const String &in) {
+  String out;
+  out.reserve(in.length() + 8);
+  for (size_t i = 0; i < in.length(); i++) {
+    char c = in[i];
+    switch (c) {
+      case '\\':
+        out += "\\\\";
+        break;
+      case '"':
+        out += "\\\"";
+        break;
+      case '\n':
+        out += "\\n";
+        break;
+      case '\r':
+        out += "\\r";
+        break;
+      case '\t':
+        out += "\\t";
+        break;
+      default:
+        if ((unsigned char)c < 0x20) {
+          out += ' ';
+        } else {
+          out += c;
+        }
+        break;
+    }
+  }
+  return out;
 }
 
 void applyAdxlAxisMap(float inX, float inY, float inZ, float &outX, float &outY, float &outZ) {
@@ -190,9 +239,33 @@ String pitchDirection(float pitch) {
   return "LEVEL";
 }
 
-bool tokenOk() {
-  if (!server.hasArg("token")) return false;
-  return server.arg("token") == adminToken;
+float outputRollDeg() {
+  float roll = fusedRoll;
+  if (cal.calibrated) roll -= cal.zeroRollRef;
+  if (!isfinite(roll) || fabsf(roll) > 180.0f) roll = 0.0f;
+  return roll;
+}
+
+float outputPitchDeg() {
+  float pitch = fusedPitch;
+  if (cal.calibrated) pitch -= cal.zeroPitchRef;
+  if (!isfinite(pitch) || fabsf(pitch) > 180.0f) pitch = 0.0f;
+  return pitch;
+}
+
+bool adminTokenArgOk() {
+  return server.hasArg("token") && server.arg("token") == adminToken;
+}
+
+bool adminApiAuthorized() {
+  if (!adminSessionActive) return false;
+  if ((uint32_t)(millis() - adminSessionStartMs) > 1800000UL) {
+    adminSessionActive = false;
+    return false;
+  }
+  if (server.client().remoteIP() != adminSessionIp) return false;
+  if (!server.hasHeader("X-Admin-Nonce")) return false;
+  return server.header("X-Admin-Nonce") == adminSessionSecret;
 }
 
 void sanitizeConfig() {
@@ -224,32 +297,39 @@ void sanitizeConfig() {
   if (strlen(cfg.apPassword) < 8) strlcpy(cfg.apPassword, cfgDefaults.apPassword, sizeof(cfg.apPassword));
 }
 
-void saveConfig() {
-  sanitizeConfig();
-  prefs.begin(PREF_NS, false);
-  prefs.putBytes("cfg", &cfg, sizeof(cfg));
-  prefs.putBytes("cal", &cal, sizeof(cal));
+bool saveConfig() {
+  if (!prefs.begin(PREF_NS, false)) return false;
+  PersistState state = {cfg, cal};
+  size_t written = prefs.putBytes("state", &state, sizeof(state));
   prefs.end();
+  return written == sizeof(state);
 }
 
 void loadConfig() {
   cfgDefaults = cfg;
   prefs.begin(PREF_NS, true);
-  if (prefs.getBytesLength("cfg") == sizeof(cfg)) {
-    prefs.getBytes("cfg", &cfg, sizeof(cfg));
-  }
-  if (prefs.getBytesLength("cal") == sizeof(cal)) {
-    prefs.getBytes("cal", &cal, sizeof(cal));
+  if (prefs.getBytesLength("state") == sizeof(PersistState)) {
+    PersistState state;
+    prefs.getBytes("state", &state, sizeof(state));
+    cfg = state.cfg;
+    cal = state.cal;
+  } else {
+    if (prefs.getBytesLength("cfg") == sizeof(cfg)) {
+      prefs.getBytes("cfg", &cfg, sizeof(cfg));
+    }
+    if (prefs.getBytesLength("cal") == sizeof(cal)) {
+      prefs.getBytes("cal", &cal, sizeof(cal));
+    }
   }
   prefs.end();
   sanitizeConfig();
 }
 
-void resetDefaults() {
+bool resetDefaults() {
   cfg = cfgDefaults;
   cal = CalibrationState();
   sanitizeConfig();
-  saveConfig();
+  return saveConfig();
 }
 
 void updateHealthState(SensorState &s, bool readOk, bool plausibleNow) {
@@ -264,6 +344,11 @@ void updateHealthState(SensorState &s, bool readOk, bool plausibleNow) {
 
   bool timeout = (millis() - s.lastGoodReadMs) > cfg.sensorTimeoutMs;
   s.healthy = s.present && !timeout && s.consecutiveFails < cfg.maxConsecutiveFails;
+}
+
+bool i2cDeviceReachable(uint8_t addr) {
+  Wire.beginTransmission(addr);
+  return Wire.endTransmission() == 0;
 }
 
 bool initSensors() {
@@ -297,7 +382,8 @@ void initDisplay() {
   tft.setTextSize(2);
   tft.setCursor(8, 8);
   tft.print("SHIP INCLINOMETER");
-  sysState.tftOk = true;
+  uint8_t mode = tft.readcommand8(ILI9341_RDMODE);
+  sysState.tftOk = !(mode == 0x00 || mode == 0xFF);
 }
 
 void initWiFiAP() {
@@ -305,17 +391,17 @@ void initWiFiAP() {
   IPAddress apIP(192, 168, 4, 1);
   IPAddress gateway(192, 168, 4, 1);
   IPAddress subnet(255, 255, 255, 0);
-  WiFi.softAPConfig(apIP, gateway, subnet);
-  WiFi.softAP(cfg.apSsid, cfg.apPassword);
-  sysState.wifiOk = true;
+  bool cfgOk = WiFi.softAPConfig(apIP, gateway, subnet);
+  bool apOk = WiFi.softAP(cfg.apSsid, cfg.apPassword);
+  sysState.wifiOk = cfgOk && apOk;
 }
 
 String statusLevel() {
   bool sensorError = (!mpuState.present && !adxlState.present) || (!mpuState.healthy && !adxlState.healthy);
   if (sensorError) return "SENSOR_ERROR";
 
-  float ar = fabsf(fusedRoll);
-  float ap = fabsf(fusedPitch);
+  float ar = fabsf(outputRollDeg());
+  float ap = fabsf(outputPitchDeg());
   if (ar >= cfg.rollDanger || ap >= cfg.pitchDanger) return "DANGER_TILT";
 
   bool tiltWarn = (ar >= cfg.rollWarning || ap >= cfg.pitchWarning);
@@ -339,6 +425,10 @@ String statusLevel() {
 
 bool readMPU() {
   if (!mpuState.present) return false;
+  if (!i2cDeviceReachable(MPU6050_I2C_ADDR)) {
+    updateHealthState(mpuState, false, false);
+    return false;
+  }
 
   sensors_event_t a, g, t;
   mpu6050.getEvent(&a, &g, &t);
@@ -370,6 +460,10 @@ bool readMPU() {
 
 bool readADXL() {
   if (!adxlState.present) return false;
+  if (!i2cDeviceReachable(ADXL345_I2C_ADDR)) {
+    updateHealthState(adxlState, false, false);
+    return false;
+  }
   sensors_event_t event;
   adxl345.getEvent(&event);
 
@@ -470,9 +564,12 @@ bool stillnessCheck(uint16_t samples, uint16_t sampleDelayMs) {
 bool calibrateSensors() {
   sysState.calibrating = true;
   sysState.calibrationMessage = "checking_stillness";
+  CalibrationState oldCal = cal;
+  CalibrationState newCal;
 
   if (!stillnessCheck(120, 10)) {
-    sysState.calibrationMessage = "failed_motion_detected";
+    sysState.calibrationMessage = cal.calibrated ? "failed_motion_detected_previous_calibration_retained"
+                                                 : "failed_motion_detected_uncalibrated";
     sysState.calibrating = false;
     return false;
   }
@@ -524,47 +621,62 @@ bool calibrateSensors() {
   }
 
   if (mpuN > 0) {
-    cal.gyroBiasX = sumGx / mpuN;
-    cal.gyroBiasY = sumGy / mpuN;
-    cal.gyroBiasZ = sumGz / mpuN;
+    newCal.gyroBiasX = sumGx / mpuN;
+    newCal.gyroBiasY = sumGy / mpuN;
+    newCal.gyroBiasZ = sumGz / mpuN;
 
-    cal.mpuGravityRefX = sumMpuAx / mpuN;
-    cal.mpuGravityRefY = sumMpuAy / mpuN;
-    cal.mpuGravityRefZ = sumMpuAz / mpuN;
+    newCal.mpuGravityRefX = sumMpuAx / mpuN;
+    newCal.mpuGravityRefY = sumMpuAy / mpuN;
+    newCal.mpuGravityRefZ = sumMpuAz / mpuN;
 
-    float rr = safeAtan2Deg(cal.mpuGravityRefY, cal.mpuGravityRefZ);
-    float denom = sqrtf(cal.mpuGravityRefY * cal.mpuGravityRefY + cal.mpuGravityRefZ * cal.mpuGravityRefZ);
+    float rr = safeAtan2Deg(newCal.mpuGravityRefY, newCal.mpuGravityRefZ);
+    float denom = sqrtf(newCal.mpuGravityRefY * newCal.mpuGravityRefY + newCal.mpuGravityRefZ * newCal.mpuGravityRefZ);
     if (denom < 0.0001f) denom = 0.0001f;
-    float pp = safeAtan2Deg(-cal.mpuGravityRefX, denom);
-    cal.zeroRollRef = rr;
-    cal.zeroPitchRef = pp;
+    float pp = safeAtan2Deg(-newCal.mpuGravityRefX, denom);
+    newCal.zeroRollRef = rr;
+    newCal.zeroPitchRef = pp;
   }
 
   if (adxlN > 0) {
-    cal.adxlGravityRefX = sumAdxlAx / adxlN;
-    cal.adxlGravityRefY = sumAdxlAy / adxlN;
-    cal.adxlGravityRefZ = sumAdxlAz / adxlN;
+    newCal.adxlGravityRefX = sumAdxlAx / adxlN;
+    newCal.adxlGravityRefY = sumAdxlAy / adxlN;
+    newCal.adxlGravityRefZ = sumAdxlAz / adxlN;
+
+    if (mpuN == 0) {
+      float rr = safeAtan2Deg(newCal.adxlGravityRefY, newCal.adxlGravityRefZ);
+      float denom = sqrtf(newCal.adxlGravityRefY * newCal.adxlGravityRefY + newCal.adxlGravityRefZ * newCal.adxlGravityRefZ);
+      if (denom < 0.0001f) denom = 0.0001f;
+      float pp = safeAtan2Deg(-newCal.adxlGravityRefX, denom);
+      newCal.zeroRollRef = rr;
+      newCal.zeroPitchRef = pp;
+    }
   }
 
-  cal.adxlRollAlign = 0;
-  cal.adxlPitchAlign = 0;
+  newCal.adxlRollAlign = 0;
+  newCal.adxlPitchAlign = 0;
   if (mpuN > 0 && adxlN > 0) {
-    float adxlRoll = safeAtan2Deg(cal.adxlGravityRefY, cal.adxlGravityRefZ);
-    float denom = sqrtf(cal.adxlGravityRefY * cal.adxlGravityRefY + cal.adxlGravityRefZ * cal.adxlGravityRefZ);
+    float adxlRoll = safeAtan2Deg(newCal.adxlGravityRefY, newCal.adxlGravityRefZ);
+    float denom = sqrtf(newCal.adxlGravityRefY * newCal.adxlGravityRefY + newCal.adxlGravityRefZ * newCal.adxlGravityRefZ);
     if (denom < 0.0001f) denom = 0.0001f;
-    float adxlPitch = safeAtan2Deg(-cal.adxlGravityRefX, denom);
+    float adxlPitch = safeAtan2Deg(-newCal.adxlGravityRefX, denom);
 
-    float mpuRoll = safeAtan2Deg(cal.mpuGravityRefY, cal.mpuGravityRefZ);
-    denom = sqrtf(cal.mpuGravityRefY * cal.mpuGravityRefY + cal.mpuGravityRefZ * cal.mpuGravityRefZ);
+    float mpuRoll = safeAtan2Deg(newCal.mpuGravityRefY, newCal.mpuGravityRefZ);
+    denom = sqrtf(newCal.mpuGravityRefY * newCal.mpuGravityRefY + newCal.mpuGravityRefZ * newCal.mpuGravityRefZ);
     if (denom < 0.0001f) denom = 0.0001f;
-    float mpuPitch = safeAtan2Deg(-cal.mpuGravityRefX, denom);
+    float mpuPitch = safeAtan2Deg(-newCal.mpuGravityRefX, denom);
 
-    cal.adxlRollAlign = mpuRoll - adxlRoll;
-    cal.adxlPitchAlign = mpuPitch - adxlPitch;
+    newCal.adxlRollAlign = mpuRoll - adxlRoll;
+    newCal.adxlPitchAlign = mpuPitch - adxlPitch;
   }
 
-  cal.calibrated = true;
-  saveConfig();
+  newCal.calibrated = true;
+  cal = newCal;
+  if (!saveConfig()) {
+    cal = oldCal;
+    sysState.calibrationMessage = "ok_save_failed";
+    sysState.calibrating = false;
+    return false;
+  }
 
   sysState.calibrationMessage = "ok";
   sysState.calibrating = false;
@@ -572,6 +684,7 @@ bool calibrateSensors() {
 }
 
 void readSensorsTask() {
+  if (sysState.calibrating) return;
   readMPU();
   readADXL();
 
@@ -584,6 +697,7 @@ void readSensorsTask() {
 }
 
 void filterTask() {
+  if (sysState.calibrating) return;
   uint32_t nowUs = micros();
   float dt = (nowUs - lastFilterMicros) / 1000000.0f;
   lastFilterMicros = nowUs;
@@ -629,11 +743,6 @@ void filterTask() {
     fusedPitch += corrGain * (accelPitch - fusedPitch);
   }
 
-  if (cal.calibrated) {
-    fusedRoll -= cal.zeroRollRef;
-    fusedPitch -= cal.zeroPitchRef;
-  }
-
   if (!isfinite(fusedRoll) || fabsf(fusedRoll) > 180.0f) fusedRoll = 0.0f;
   if (!isfinite(fusedPitch) || fabsf(fusedPitch) > 180.0f) fusedPitch = 0.0f;
 
@@ -648,25 +757,27 @@ uint16_t statusColor(const String &st) {
 
 void updateTftTask() {
   if (!sysState.tftOk) return;
+  float rollOut = outputRollDeg();
+  float pitchOut = outputPitchDeg();
 
   tft.fillRect(0, 36, 320, 204, ILI9341_BLACK);
   tft.setTextSize(2);
   tft.setTextColor(ILI9341_WHITE, ILI9341_BLACK);
   tft.setCursor(8, 40);
   tft.print("ROLL : ");
-  tft.print(fmtf(fusedRoll));
+  tft.print(fmtf(rollOut));
   tft.print((char)247);
   tft.setCursor(8, 62);
   tft.print("PITCH: ");
-  tft.print(fmtf(fusedPitch));
+  tft.print(fmtf(pitchOut));
   tft.print((char)247);
 
   tft.setCursor(8, 86);
   tft.print("R DIR: ");
-  tft.print(rollDirection(fusedRoll));
+  tft.print(rollDirection(rollOut));
   tft.setCursor(8, 108);
   tft.print("P DIR: ");
-  tft.print(pitchDirection(fusedPitch));
+  tft.print(pitchDirection(pitchOut));
 
   tft.setCursor(8, 136);
   tft.print("MPU  ");
@@ -683,8 +794,10 @@ void updateTftTask() {
 }
 
 void serialTask() {
+  float rollOut = outputRollDeg();
+  float pitchOut = outputPitchDeg();
   Serial.println(F("----- Inclinometer Telemetry -----"));
-  Serial.printf("ROLL: %.2f deg (%s) | PITCH: %.2f deg (%s)\n", fusedRoll, rollDirection(fusedRoll).c_str(), fusedPitch, pitchDirection(fusedPitch).c_str());
+  Serial.printf("ROLL: %.2f deg (%s) | PITCH: %.2f deg (%s)\n", rollOut, rollDirection(rollOut).c_str(), pitchOut, pitchDirection(pitchOut).c_str());
 
   Serial.printf("MPU6050 present=%d healthy=%d acc[g]=(%.3f,%.3f,%.3f) gyro[dps]=(%.3f,%.3f,%.3f) roll=%.2f pitch=%.2f\n",
                 mpuState.present, mpuState.healthy, mpuState.ax, mpuState.ay, mpuState.az, mpuState.gx, mpuState.gy, mpuState.gz, mpuState.roll, mpuState.pitch);
@@ -701,8 +814,7 @@ void serialTask() {
   Serial.printf("AP: %s IP: %s clients=%d\n", cfg.apSsid, WiFi.softAPIP().toString().c_str(), WiFi.softAPgetStationNum());
 }
 
-String basePageHtml(bool adminMode) {
-  String token = server.hasArg("token") ? server.arg("token") : "";
+String basePageHtml(bool adminMode, const String &adminNonce = "") {
   String h = F(
       "<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
       "<title>Ship Inclinometer</title><style>"
@@ -744,10 +856,9 @@ String basePageHtml(bool adminMode) {
   h += F("</div><script>"
          "const admin=" );
   h += adminMode ? "true" : "false";
-  h += F(";const token='" );
-  h += token;
-  h += F("';"
-         "const q=(i)=>document.getElementById(i);"
+  h += F(";const adminNonce='");
+  h += adminNonce;
+  h += F("';const q=(i)=>document.getElementById(i);"
          "const fmt=(v,p=2)=>Number.isFinite(v)?v.toFixed(p):'n/a';"
          "async function updateData(){try{const r=await fetch('/api/data');const d=await r.json();"
          "q('rollVal').textContent=`${fmt(d.roll)}°`;q('pitchVal').textContent=`${fmt(d.pitch)}°`;"
@@ -766,13 +877,13 @@ String basePageHtml(bool adminMode) {
          "q('upd').textContent='Updated '+new Date(d.system.updated_ms).toLocaleTimeString();"
          "const dot=q('statusDot');dot.className=(d.system.status.includes('DANGER')||d.system.status.includes('ERROR'))?'danger':(d.system.status.includes('WARNING')?'warn':'ok');"
          "dot.textContent=d.system.status;}catch(e){q('upd').textContent='update failed';}}"
-         "async function loadSettings(){if(!admin) return;const r=await fetch('/api/settings?token='+encodeURIComponent(token));if(!r.ok) return;const d=await r.json();"
+         "async function loadSettings(){if(!admin) return;const r=await fetch('/api/settings',{headers:{'X-Admin-Nonce':adminNonce}});if(!r.ok) return;const d=await r.json();"
          "for(const k of ['rollWarning','rollDanger','pitchWarning','pitchDanger','sensorDiffWarning','compBaseGain','accelLpfAlpha','linearAccelRejectG']){if(q(k)) q(k).value=d[k];}"
          "q('adxlAxis').value=[d.adxlAxis.x,d.adxlAxis.y,d.adxlAxis.z].join(',');q('adxlSign').value=[d.adxlAxis.sx,d.adxlAxis.sy,d.adxlAxis.sz].join(',');}"
-         "async function saveSettings(){if(!admin) return;const p=new URLSearchParams({token,rollWarning:q('rollWarning').value,rollDanger:q('rollDanger').value,pitchWarning:q('pitchWarning').value,pitchDanger:q('pitchDanger').value,sensorDiffWarning:q('sensorDiffWarning').value,compBaseGain:q('compBaseGain').value,accelLpfAlpha:q('accelLpfAlpha').value,linearAccelRejectG:q('linearAccelRejectG').value,adxlAxis:q('adxlAxis').value,adxlSign:q('adxlSign').value});"
-         "const r=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:p});q('adminMsg').textContent=await r.text();}"
-         "async function recalibrate(){if(!admin) return;q('adminMsg').textContent='Calibration in progress... keep vessel still';const p=new URLSearchParams({token});const r=await fetch('/api/calibrate',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:p});q('adminMsg').textContent=await r.text();}"
-         "async function resetDefaults(){if(!admin) return;const p=new URLSearchParams({token});const r=await fetch('/api/reset',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:p});q('adminMsg').textContent=await r.text();loadSettings();}"
+         "async function saveSettings(){if(!admin) return;const p=new URLSearchParams({rollWarning:q('rollWarning').value,rollDanger:q('rollDanger').value,pitchWarning:q('pitchWarning').value,pitchDanger:q('pitchDanger').value,sensorDiffWarning:q('sensorDiffWarning').value,compBaseGain:q('compBaseGain').value,accelLpfAlpha:q('accelLpfAlpha').value,linearAccelRejectG:q('linearAccelRejectG').value,adxlAxis:q('adxlAxis').value,adxlSign:q('adxlSign').value});"
+         "const r=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded','X-Admin-Nonce':adminNonce},body:p});q('adminMsg').textContent=await r.text();}"
+         "async function recalibrate(){if(!admin) return;q('adminMsg').textContent='Calibration in progress... keep vessel still';const p=new URLSearchParams({calibrate:'1'});const r=await fetch('/api/calibrate',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded','X-Admin-Nonce':adminNonce},body:p});q('adminMsg').textContent=await r.text();}"
+         "async function resetDefaults(){if(!admin) return;const p=new URLSearchParams({reset:'1'});const r=await fetch('/api/reset',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded','X-Admin-Nonce':adminNonce},body:p});q('adminMsg').textContent=await r.text();loadSettings();}"
          "updateData();setInterval(updateData," );
   h += String(cfg.webMs);
   h += F(");loadSettings();</script></body></html>");
@@ -786,6 +897,8 @@ String sensorStatusString(const SensorState &s) {
 }
 
 String buildDataJson() {
+  float rollOut = outputRollDeg();
+  float pitchOut = outputPitchDeg();
   float diffRoll = NAN;
   float diffPitch = NAN;
   if (mpuState.healthy && adxlState.healthy) {
@@ -794,35 +907,35 @@ String buildDataJson() {
   }
 
   String j = "{";
-  j += "\"roll\":" + fmtf(fusedRoll, 3);
-  j += ",\"pitch\":" + fmtf(fusedPitch, 3);
-  j += ",\"roll_direction\":\"" + rollDirection(fusedRoll) + "\"";
-  j += ",\"pitch_direction\":\"" + pitchDirection(fusedPitch) + "\"";
+  j += "\"roll\":" + fmtf(rollOut, 3);
+  j += ",\"pitch\":" + fmtf(pitchOut, 3);
+  j += ",\"roll_direction\":\"" + jsonEscape(rollDirection(rollOut)) + "\"";
+  j += ",\"pitch_direction\":\"" + jsonEscape(pitchDirection(pitchOut)) + "\"";
 
   j += ",\"mpu\":{";
   j += "\"ax\":" + fmtf(mpuState.ax, 4) + ",\"ay\":" + fmtf(mpuState.ay, 4) + ",\"az\":" + fmtf(mpuState.az, 4);
   j += ",\"gx\":" + fmtf(mpuState.gx, 4) + ",\"gy\":" + fmtf(mpuState.gy, 4) + ",\"gz\":" + fmtf(mpuState.gz, 4);
   j += ",\"roll\":" + fmtf(mpuState.roll, 3) + ",\"pitch\":" + fmtf(mpuState.pitch, 3);
-  j += ",\"status\":\"" + sensorStatusString(mpuState) + "\"}";
+  j += ",\"status\":\"" + jsonEscape(sensorStatusString(mpuState)) + "\"}";
 
   j += ",\"adxl\":{";
   j += "\"ax\":" + fmtf(adxlState.ax, 4) + ",\"ay\":" + fmtf(adxlState.ay, 4) + ",\"az\":" + fmtf(adxlState.az, 4);
   j += ",\"roll\":" + fmtf(adxlState.roll, 3) + ",\"pitch\":" + fmtf(adxlState.pitch, 3);
-  j += ",\"status\":\"" + sensorStatusString(adxlState) + "\"}";
+  j += ",\"status\":\"" + jsonEscape(sensorStatusString(adxlState)) + "\"}";
 
   j += ",\"diff\":{\"roll\":" + fmtf(diffRoll, 3) + ",\"pitch\":" + fmtf(diffPitch, 3) + "}";
   j += ",\"adxl_align\":{\"roll\":" + fmtf(cal.adxlRollAlign, 3) + ",\"pitch\":" + fmtf(cal.adxlPitchAlign, 3) + "}";
   j += ",\"accel_confidence\":" + fmtf(accelConfidence, 3);
 
   j += ",\"system\":{";
-  j += "\"status\":\"" + sysState.systemStatus + "\"";
-  j += ",\"calibration\":\"" + sysState.calibrationMessage + "\"";
-  j += ",\"uptime\":\"" + uptimeString() + "\"";
+  j += "\"status\":\"" + jsonEscape(sysState.systemStatus) + "\"";
+  j += ",\"calibration\":\"" + jsonEscape(sysState.calibrationMessage) + "\"";
+  j += ",\"uptime\":\"" + jsonEscape(uptimeString()) + "\"";
   j += ",\"updated_ms\":" + String(millis()) + "}";
 
   j += ",\"network\":{";
-  j += "\"ssid\":\"" + String(cfg.apSsid) + "\"";
-  j += ",\"ip\":\"" + WiFi.softAPIP().toString() + "\"";
+  j += "\"ssid\":\"" + jsonEscape(String(cfg.apSsid)) + "\"";
+  j += ",\"ip\":\"" + jsonEscape(WiFi.softAPIP().toString()) + "\"";
   j += ",\"clients\":" + String(WiFi.softAPgetStationNum()) + "}";
 
   j += "}";
@@ -834,11 +947,15 @@ void handleRoot() {
 }
 
 void handleAdmin() {
-  if (!tokenOk()) {
+  if (!adminTokenArgOk()) {
     server.send(401, "text/plain", "Admin token required: /admin?token=...");
     return;
   }
-  server.send(200, "text/html", basePageHtml(true));
+  adminSessionIp = server.client().remoteIP();
+  adminSessionStartMs = millis();
+  adminSessionActive = true;
+  adminSessionSecret = hex8Upper((uint32_t)esp_random()) + hex8Upper((uint32_t)esp_random());
+  server.send(200, "text/html", basePageHtml(true, adminSessionSecret));
 }
 
 void handleData() {
@@ -846,7 +963,7 @@ void handleData() {
 }
 
 void handleSettingsGet() {
-  if (!tokenOk()) {
+  if (!adminApiAuthorized()) {
     server.send(401, "application/json", "{\"error\":\"unauthorized\"}");
     return;
   }
@@ -865,57 +982,142 @@ void handleSettingsGet() {
   server.send(200, "application/json", j);
 }
 
-float argFloat(const char *k, float fallback) {
-  if (!server.hasArg(k)) return fallback;
-  return server.arg(k).toFloat();
+bool parseOptionalFloatArg(const char *k, float &target) {
+  if (!server.hasArg(k)) return true;
+  String raw = server.arg(k);
+  const char *s = raw.c_str();
+  char *end = nullptr;
+  float parsed = strtof(s, &end);
+  if (end == s) return false;
+  while (*end == ' ' || *end == '\t' || *end == '\r' || *end == '\n') end++;
+  if (*end != '\0' || !isfinite(parsed)) return false;
+  target = parsed;
+  return true;
 }
 
-void parseAxisArgs() {
+bool parseCsvInt3(const String &raw, int &a, int &b, int &c) {
+  int p1 = raw.indexOf(',');
+  int p2 = raw.indexOf(',', p1 + 1);
+  if (p1 <= 0 || p2 <= p1) return false;
+
+  String sa = raw.substring(0, p1);
+  String sb = raw.substring(p1 + 1, p2);
+  String sc = raw.substring(p2 + 1);
+  sa.trim();
+  sb.trim();
+  sc.trim();
+
+  auto parseStrictInt = [](const String &s, int &out) -> bool {
+    if (s.length() == 0) return false;
+    const char *raw = s.c_str();
+    char *end = nullptr;
+    long parsed = strtol(raw, &end, 10);
+    if (end == raw) return false;
+    while (*end == ' ' || *end == '\t' || *end == '\r' || *end == '\n') end++;
+    if (*end != '\0') return false;
+    if (parsed < -32768 || parsed > 32767) return false;
+    out = (int)parsed;
+    return true;
+  };
+
+  return parseStrictInt(sa, a) && parseStrictInt(sb, b) && parseStrictInt(sc, c);
+}
+
+bool parseAxisArgsStrict(AxisMap &axis, String &errorField) {
   if (server.hasArg("adxlAxis")) {
-    String a = server.arg("adxlAxis");
-    int p1 = a.indexOf(',');
-    int p2 = a.indexOf(',', p1 + 1);
-    if (p1 > 0 && p2 > p1) {
-      cfg.adxlAxis.x = a.substring(0, p1).toInt();
-      cfg.adxlAxis.y = a.substring(p1 + 1, p2).toInt();
-      cfg.adxlAxis.z = a.substring(p2 + 1).toInt();
+    int x = 0, y = 1, z = 2;
+    if (!parseCsvInt3(server.arg("adxlAxis"), x, y, z)) {
+      errorField = "adxlAxis";
+      return false;
     }
+    bool validPermutation = (x >= 0 && x <= 2) && (y >= 0 && y <= 2) && (z >= 0 && z <= 2) && (x != y) && (x != z) && (y != z);
+    if (!validPermutation) {
+      errorField = "adxlAxis";
+      return false;
+    }
+    axis.x = x;
+    axis.y = y;
+    axis.z = z;
   }
   if (server.hasArg("adxlSign")) {
-    String a = server.arg("adxlSign");
-    int p1 = a.indexOf(',');
-    int p2 = a.indexOf(',', p1 + 1);
-    if (p1 > 0 && p2 > p1) {
-      cfg.adxlAxis.sx = a.substring(0, p1).toInt();
-      cfg.adxlAxis.sy = a.substring(p1 + 1, p2).toInt();
-      cfg.adxlAxis.sz = a.substring(p2 + 1).toInt();
+    int sx = 1, sy = 1, sz = 1;
+    if (!parseCsvInt3(server.arg("adxlSign"), sx, sy, sz)) {
+      errorField = "adxlSign";
+      return false;
     }
+    if (!((sx == 1 || sx == -1) && (sy == 1 || sy == -1) && (sz == 1 || sz == -1))) {
+      errorField = "adxlSign";
+      return false;
+    }
+    axis.sx = sx;
+    axis.sy = sy;
+    axis.sz = sz;
   }
+  return true;
+}
+
+String validateConfigCandidate(const Config &c) {
+  if (c.rollWarning < 0.5f || c.rollWarning > 180.0f) return "rollWarning";
+  if (c.pitchWarning < 0.5f || c.pitchWarning > 180.0f) return "pitchWarning";
+  if (c.rollDanger < 0.6f || c.rollDanger > 180.0f) return "rollDanger";
+  if (c.pitchDanger < 0.6f || c.pitchDanger > 180.0f) return "pitchDanger";
+  if (c.rollDanger < c.rollWarning + 0.1f) return "rollDanger";
+  if (c.pitchDanger < c.pitchWarning + 0.1f) return "pitchDanger";
+  if (c.sensorDiffWarning < 0.5f || c.sensorDiffWarning > 45.0f) return "sensorDiffWarning";
+  if (c.compBaseGain < 0.001f || c.compBaseGain > 0.25f) return "compBaseGain";
+  if (c.accelLpfAlpha < 0.01f || c.accelLpfAlpha > 0.95f) return "accelLpfAlpha";
+  if (c.linearAccelRejectG < 0.05f || c.linearAccelRejectG > 1.5f) return "linearAccelRejectG";
+  return "";
 }
 
 void handleSettingsPost() {
-  if (!tokenOk()) {
+  if (!adminApiAuthorized()) {
     server.send(401, "text/plain", "unauthorized");
     return;
   }
 
-  cfg.rollWarning = argFloat("rollWarning", cfg.rollWarning);
-  cfg.rollDanger = argFloat("rollDanger", cfg.rollDanger);
-  cfg.pitchWarning = argFloat("pitchWarning", cfg.pitchWarning);
-  cfg.pitchDanger = argFloat("pitchDanger", cfg.pitchDanger);
-  cfg.sensorDiffWarning = argFloat("sensorDiffWarning", cfg.sensorDiffWarning);
-  cfg.compBaseGain = argFloat("compBaseGain", cfg.compBaseGain);
-  cfg.accelLpfAlpha = argFloat("accelLpfAlpha", cfg.accelLpfAlpha);
-  cfg.linearAccelRejectG = argFloat("linearAccelRejectG", cfg.linearAccelRejectG);
-  parseAxisArgs();
+  Config nextCfg = cfg;
+  auto parseField = [&](const char *key, float &target) -> bool {
+    if (!parseOptionalFloatArg(key, target)) {
+      server.send(400, "text/plain", String("invalid numeric value: ") + key);
+      return false;
+    }
+    return true;
+  };
+  if (!parseField("rollWarning", nextCfg.rollWarning) ||
+      !parseField("rollDanger", nextCfg.rollDanger) ||
+      !parseField("pitchWarning", nextCfg.pitchWarning) ||
+      !parseField("pitchDanger", nextCfg.pitchDanger) ||
+      !parseField("sensorDiffWarning", nextCfg.sensorDiffWarning) ||
+      !parseField("compBaseGain", nextCfg.compBaseGain) ||
+      !parseField("accelLpfAlpha", nextCfg.accelLpfAlpha) ||
+      !parseField("linearAccelRejectG", nextCfg.linearAccelRejectG)) {
+    return;
+  }
+  String axisError;
+  if (!parseAxisArgsStrict(nextCfg.adxlAxis, axisError)) {
+    server.send(400, "text/plain", String("invalid axis/sign mapping: ") + axisError);
+    return;
+  }
+  String rangeError = validateConfigCandidate(nextCfg);
+  if (rangeError.length() > 0) {
+    server.send(400, "text/plain", String("out-of-range value: ") + rangeError);
+    return;
+  }
+  Config prevCfg = cfg;
+  cfg = nextCfg;
   sanitizeConfig();
-  saveConfig();
+  if (!saveConfig()) {
+    cfg = prevCfg;
+    server.send(500, "text/plain", "settings save failed");
+    return;
+  }
 
   server.send(200, "text/plain", "settings saved");
 }
 
 void handleCalibrate() {
-  if (!tokenOk()) {
+  if (!adminApiAuthorized()) {
     server.send(401, "text/plain", "unauthorized");
     return;
   }
@@ -924,15 +1126,33 @@ void handleCalibrate() {
 }
 
 void handleReset() {
-  if (!tokenOk()) {
+  if (!adminApiAuthorized()) {
     server.send(401, "text/plain", "unauthorized");
     return;
   }
-  resetDefaults();
+  if (!resetDefaults()) {
+    server.send(500, "text/plain", "defaults restore failed");
+    return;
+  }
+  fusedRoll = 0.0f;
+  fusedPitch = 0.0f;
+  mpuState.axLpf = mpuState.ayLpf = mpuState.azLpf = 0.0f;
+  adxlState.axLpf = adxlState.ayLpf = adxlState.azLpf = 0.0f;
+  readSensorsTask();
+  if (mpuState.healthy) {
+    fusedRoll = mpuState.roll;
+    fusedPitch = mpuState.pitch;
+  } else if (adxlState.healthy) {
+    fusedRoll = adxlState.roll;
+    fusedPitch = adxlState.pitch;
+  }
   server.send(200, "text/plain", "defaults restored");
 }
 
 void initWebServer() {
+  const char *headerKeys[] = {"X-Admin-Nonce"};
+  server.collectHeaders(headerKeys, 1);
+
   server.on("/", HTTP_GET, handleRoot);
   server.on("/admin", HTTP_GET, handleAdmin);
   server.on("/api/data", HTTP_GET, handleData);
@@ -954,9 +1174,18 @@ void printBootInfo() {
   Serial.printf("TFT SPI pins SCK=%d MISO=%d MOSI=%d CS=%d DC=%d RST=%d\n", pins.tftSck, pins.tftMiso, pins.tftMosi, pins.tftCs, pins.tftDc, pins.tftRst);
   Serial.printf("MPU6050: %s | ADXL345: %s | TFT: %s\n", mpuState.present ? "detected" : "missing", adxlState.present ? "detected" : "missing", sysState.tftOk ? "ok" : "error");
   Serial.printf("AP SSID: %s\n", cfg.apSsid);
-  Serial.printf("AP PASS: %s\n", cfg.apPassword);
   Serial.printf("AP IP: %s\n", WiFi.softAPIP().toString().c_str());
-  Serial.printf("Admin URL: http://%s/admin?token=%s\n", WiFi.softAPIP().toString().c_str(), adminToken.c_str());
+  Serial.printf("Admin Path: http://%s/admin\n", WiFi.softAPIP().toString().c_str());
+  if (PRINT_COMMISSIONING_SECRETS) {
+    Serial.printf("AP PASS (commissioning): %s\n", cfg.apPassword);
+    Serial.printf("Admin Token (commissioning): %s\n", adminToken.c_str());
+  }
+}
+
+String hex8Upper(uint32_t v) {
+  char b[9];
+  snprintf(b, sizeof(b), "%08lX", (unsigned long)v);
+  return String(b);
 }
 
 void setup() {
@@ -966,10 +1195,9 @@ void setup() {
   sysState.bootMs = millis();
   loadConfig();
 
-  uint64_t mac = ESP.getEfuseMac();
-  char tokenBuf[24];
-  snprintf(tokenBuf, sizeof(tokenBuf), "ADM-%06llX", (unsigned long long)(mac & 0xFFFFFFULL));
-  adminToken = String(tokenBuf);
+  uint32_t tokenPartA = (uint32_t)esp_random();
+  uint32_t tokenPartB = (uint32_t)esp_random();
+  adminToken = String("ADM-") + hex8Upper(tokenPartA) + hex8Upper(tokenPartB);
 
   initSensors();
   initDisplay();
@@ -987,6 +1215,15 @@ void setup() {
     calibrateSensors();
   } else {
     sysState.calibrationMessage = "skipped";
+  }
+
+  readSensorsTask();
+  if (mpuState.healthy) {
+    fusedRoll = mpuState.roll;
+    fusedPitch = mpuState.pitch;
+  } else if (adxlState.healthy) {
+    fusedRoll = adxlState.roll;
+    fusedPitch = adxlState.pitch;
   }
 
   sysState.systemStatus = statusLevel();
