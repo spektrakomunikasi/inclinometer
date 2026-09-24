@@ -188,6 +188,7 @@ void initWebServer();
 
 bool calibrateSensors();
 bool sensorsAreStill(uint16_t samples = 80);
+bool adxlIsStill(uint16_t samples = 80);
 
 void readMPU6050();
 void readADXL345();
@@ -200,13 +201,14 @@ void updateWebData();
 void updateSerial();
 void checkAlarm();
 
-String webHtml();
+String webHtml(bool adminPage);
 String buildDataJson();
 String jsonEscape(const String &input);
 bool isAuthorized();
 bool tryParseFloatArg(const char *name, float &outValue);
 bool tryParseUIntArg(const char *name, uint16_t &outValue);
 void handleRoot();
+void handleAdmin();
 void handleData();
 void handleSettingsGet();
 void handleSettingsPost();
@@ -353,6 +355,7 @@ void initWebServer() {
   const char *headerKeys[] = {"X-Admin-Token"};
   server.collectHeaders(headerKeys, 1);
   server.on("/", HTTP_GET, handleRoot);
+  server.on("/admin", HTTP_GET, handleAdmin);
   server.on("/api/data", HTTP_GET, handleData);
   server.on("/api/settings", HTTP_GET, handleSettingsGet);
   server.on("/api/settings", HTTP_POST, handleSettingsPost);
@@ -364,6 +367,36 @@ void initWebServer() {
 bool sensorsAreStill(uint16_t samples) {
   if (!mpu.detected) {
     return false;
+  }
+
+  bool adxlIsStill(uint16_t samples) {
+    if (!adxl.detected) {
+      return false;
+    }
+
+    float peakDeviationG = 0.0f;
+    float peakStepG = 0.0f;
+    float prevNormG = 1.0f;
+
+    for (uint16_t i = 0; i < samples; i++) {
+      sensors_event_t e;
+      adxl345.getEvent(&e);
+
+      float norm = sqrtf(e.acceleration.x * e.acceleration.x +
+                         e.acceleration.y * e.acceleration.y +
+                         e.acceleration.z * e.acceleration.z);
+      float normG = norm / 9.80665f;
+      float deviation = fabsf(normG - 1.0f);
+      peakDeviationG = fmaxf(peakDeviationG, deviation);
+
+      if (i > 0) {
+        peakStepG = fmaxf(peakStepG, fabsf(normG - prevNormG));
+      }
+      prevNormG = normG;
+      yield();
+    }
+
+    return peakDeviationG < 0.08f && peakStepG < 0.04f;
   }
 
   float gyroPeak = 0.0f;
@@ -402,9 +435,16 @@ bool calibrateSensors() {
   sysData.calibrating = true;
   updateTFT(true);
 
-  if (mpu.detected && !sensorsAreStill(120)) {
-    sysData.calibrating = false;
-    return false;
+  if (mpu.detected) {
+    if (!sensorsAreStill(120)) {
+      sysData.calibrating = false;
+      return false;
+    }
+  } else if (adxl.detected) {
+    if (!adxlIsStill(120)) {
+      sysData.calibrating = false;
+      return false;
+    }
   }
 
   const uint16_t samples = 250;
@@ -533,10 +573,14 @@ void validateSensors() {
   }
 
   if (!mpu.healthy) {
-    sysData.rollDiff = 0.0f;
-    sysData.pitchDiff = 0.0f;
-    sysData.state = STATE_SENSOR_ERROR;
-    return;
+    if (!adxl.healthy) {
+      sysData.rollDiff = 0.0f;
+      sysData.pitchDiff = 0.0f;
+      sysData.state = STATE_SENSOR_ERROR;
+      return;
+    }
+    mpu.roll = adxl.roll;
+    mpu.pitch = adxl.pitch;
   }
   float absRoll = fabsf(mpu.roll);
   float absPitch = fabsf(mpu.pitch);
@@ -858,7 +902,11 @@ bool tryParseUIntArg(const char *name, uint16_t &outValue) {
 }
 
 void handleRoot() {
-  server.send(200, "text/html", webHtml());
+  server.send(200, "text/html", webHtml(false));
+}
+
+void handleAdmin() {
+  server.send(200, "text/html", webHtml(true));
 }
 
 void handleData() {
@@ -1027,8 +1075,8 @@ void handleReset() {
   server.send(200, "application/json", "{\"ok\":true}");
 }
 
-String webHtml() {
-  return R"HTML(
+String webHtml(bool adminPage) {
+  String html = R"HTML(
 <!doctype html>
 <html lang="en">
 <head>
@@ -1062,6 +1110,7 @@ button{background:#173455;cursor:pointer}button:hover{filter:brightness(1.1)}
     <div><span class="online">ONLINE</span> <span class="small" id="stamp">-</span></div>
   </div>
 
+  <!--ADMIN-START-->
   <div class="row two" style="margin-top:12px">
     <div class="card">
       <div>ROLL</div>
@@ -1135,6 +1184,7 @@ button{background:#173455;cursor:pointer}button:hover{filter:brightness(1.1)}
       <div id="flags" class="small"></div>
     </div>
   </div>
+  <!--ADMIN-END-->
 </div>
 <script>
 let pollMs=250;
@@ -1215,23 +1265,39 @@ async function post(path,params){
   return r;
 }
 
-byId('btnSave').onclick=async()=>{
-  const p={
-    rollWarning:byId('rollWarning').value,rollDanger:byId('rollDanger').value,
-    pitchWarning:byId('pitchWarning').value,pitchDanger:byId('pitchDanger').value,
-    diffThreshold:byId('diffThreshold').value,alpha:byId('alpha').value,
-    webUpdateMs:byId('webUpdateMs').value,apPassword:byId('apPassword').value,
-    newAdminToken:byId('newAdminToken').value,
-    startupCalibration:byId('startupCalibration').checked?'1':'0'
+const hasAdmin=!!byId('btnSave');
+if(hasAdmin){
+  loadSettings().then(updateData);
+  byId('btnSave').onclick=async()=>{
+    const p={
+      rollWarning:byId('rollWarning').value,rollDanger:byId('rollDanger').value,
+      pitchWarning:byId('pitchWarning').value,pitchDanger:byId('pitchDanger').value,
+      diffThreshold:byId('diffThreshold').value,alpha:byId('alpha').value,
+      webUpdateMs:byId('webUpdateMs').value,apPassword:byId('apPassword').value,
+      newAdminToken:byId('newAdminToken').value,
+      startupCalibration:byId('startupCalibration').checked?'1':'0'
+    };
+    await post('/api/settings',p); await loadSettings();
   };
-  await post('/api/settings',p); await loadSettings();
-};
-byId('btnCal').onclick=()=>post('/api/calibrate');
-byId('btnReset').onclick=async()=>{await post('/api/reset'); await loadSettings();};
-
-loadSettings().then(updateData);
+  byId('btnCal').onclick=()=>post('/api/calibrate');
+  byId('btnReset').onclick=async()=>{await post('/api/reset'); await loadSettings();};
+} else {
+  updateData();
+}
 </script>
 </body>
 </html>
 )HTML";
+
+  if (!adminPage) {
+    int start = html.indexOf("<!--ADMIN-START-->");
+    int end = html.indexOf("<!--ADMIN-END-->");
+    if (start >= 0 && end > start) {
+      end += String("<!--ADMIN-END-->").length();
+      String replacement = "<div class=\"card\" style=\"margin-top:12px\"><h3>SETTINGS</h3><div class=\"small\">Read-only page. Open <b>/admin</b> to access configuration controls.</div></div>";
+      html = html.substring(0, start) + replacement + html.substring(end);
+    }
+  }
+
+  return html;
 }
