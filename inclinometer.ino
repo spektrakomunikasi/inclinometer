@@ -248,9 +248,9 @@ bool tokenOkApi() {
 }
 
 bool originAllowed() {
-  if (!server.hasHeader("Origin")) return true;
+  if (!server.hasHeader("Origin")) return false;
   String origin = server.header("Origin");
-  if (origin.length() == 0) return true;
+  if (origin.length() == 0) return false;
   String ipOrigin = String("http://") + WiFi.softAPIP().toString();
   if (origin == ipOrigin || origin == ipOrigin + "/") return true;
   if (origin == String("http://") + cfg.apSsid || origin == String("http://") + cfg.apSsid + "/") return true;
@@ -1075,18 +1075,18 @@ void printBootInfo() {
 }
 
 String randomToken() {
-  char b[33];
-  for (uint8_t i = 0; i < 16; i++) {
+  char b[65];
+  for (uint8_t i = 0; i < 32; i++) {
     uint8_t r = (uint8_t)(esp_random() & 0xFF);
     snprintf(&b[i * 2], 3, "%02X", r);
   }
-  b[32] = '\0';
+  b[64] = '\0';
   return String("ADM-") + String(b);
 }
 
 bool isValidAdminTokenFormat(const String &v) {
   if (!v.startsWith("ADM-")) return false;
-  if (v.length() != 36) return false;
+  if (v.length() != 68) return false;
   for (int i = 4; i < (int)v.length(); i++) {
     char c = v[i];
     bool hexDigit = (c >= '0' && c <= '9') || (c >= 'A' && c <= 'F');
