@@ -458,18 +458,19 @@ void clearCalibrationJob() {
   calJob = CalibrationJob();
 }
 
-void beginCalibrationAsync() {
+bool beginCalibrationAsync() {
   clearCalibrationJob();
   if (!mpuState.present && !adxlState.present) {
     sysState.calibrating = false;
     sysState.calibrationMessage = "failed_no_sensor";
-    return;
+    return false;
   }
   sysState.calibrating = true;
   sysState.calibrationMessage = "checking_stillness";
   calJob.active = true;
   calJob.phase = CAL_STILLNESS;
   calJob.nextSampleMs = millis();
+  return true;
 }
 
 bool evaluateStillnessAndAdvance() {
@@ -987,7 +988,10 @@ void handleCalibrate() {
     server.send(202, "text/plain", "calibration already in progress");
     return;
   }
-  beginCalibrationAsync();
+  if (!beginCalibrationAsync()) {
+    server.send(409, "text/plain", "calibration failed: no active sensor");
+    return;
+  }
   server.send(202, "text/plain", "calibration started");
 }
 
@@ -1048,10 +1052,21 @@ String randomToken() {
   return String("ADM-") + String(b);
 }
 
+bool isValidAdminTokenFormat(const String &v) {
+  if (!v.startsWith("ADM-")) return false;
+  if (v.length() != 36) return false;
+  for (int i = 4; i < (int)v.length(); i++) {
+    char c = v[i];
+    bool hexDigit = (c >= '0' && c <= '9') || (c >= 'A' && c <= 'F');
+    if (!hexDigit) return false;
+  }
+  return true;
+}
+
 void loadOrCreateAdminToken() {
   prefs.begin(PREF_NS, false);
   String stored = prefs.getString("adminToken", "");
-  if (stored.length() < 12) {
+  if (!isValidAdminTokenFormat(stored)) {
     stored = randomToken();
     prefs.putString("adminToken", stored);
   }

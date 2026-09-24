@@ -133,7 +133,7 @@ Task timing terpisah:
 - serial
 - web update frame marker
 
-Loop normal tanpa `delay()`; `delay()` hanya dipakai saat kalibrasi manual/startup calibration.
+Loop normal tanpa `delay()`, termasuk saat kalibrasi (dikelola asynchronous state machine).
 
 ## Validasi/testing pada repository ini
 
