@@ -1177,6 +1177,7 @@ String randomToken() {
 }
 
 bool isValidAdminTokenFormat(const String &v) {
+  // Persisted token format must stay: ADMIN_TOKEN_PREFIX + (2 * ADMIN_TOKEN_RANDOM_BYTES) uppercase hex chars.
   const size_t prefixLen = strlen(ADMIN_TOKEN_PREFIX);
   const size_t expectedLen = prefixLen + (ADMIN_TOKEN_RANDOM_BYTES * 2);
   if (!v.startsWith(ADMIN_TOKEN_PREFIX)) return false;
