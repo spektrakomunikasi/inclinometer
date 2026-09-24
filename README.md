@@ -64,8 +64,9 @@ Semua pin dibuat sebagai variabel konfigurasi agar mudah diubah.
 Default:
 - SSID: `SHIP-INCLINOMETER`
 - IP AP: `192.168.4.1`
-- Password: variabel konfigurasi (`apPassword`) dan bisa diubah dari web settings.
-- Admin token manajemen (default): `inclino-admin` (dibutuhkan untuk aksi SAVE/CALIBRATE/RESET).
+- Password AP default otomatis unik per device: `Ship-XXXXXXXX` (XXXXXXXX = 8 digit hex dari MAC chip).
+- Admin token manajemen default otomatis unik per device: `Admin-XXXXXXXX`.
+- Keduanya bisa diubah dari web settings.
 
 ## 7) Cara compile & upload
 1. Buka folder project di Arduino IDE.

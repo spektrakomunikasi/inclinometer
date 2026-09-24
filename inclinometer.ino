@@ -113,16 +113,16 @@ SystemData sysData;
 Adafruit_MPU6050 mpu6050;
 Adafruit_ADXL345_Unified adxl345(12345);
 SPIClass tftSPI(VSPI);
-Adafruit_ILI9341 tft(&tftSPI, DEFAULT_TFT_DC, DEFAULT_TFT_CS, DEFAULT_TFT_RST);
+Adafruit_ILI9341 *tft = nullptr;
 WebServer server(80);
 Preferences preferences;
 String webDataCache = "{}";
 
 const char *AP_SSID = "SHIP-INCLINOMETER";
-String apPassword = "ShipInclino123";
-const String defaultApPassword = "ShipInclino123";
-String adminToken = "inclino-admin";
-const String defaultAdminToken = "inclino-admin";
+String apPassword = "";
+String defaultApPassword = "";
+String adminToken = "";
+String defaultAdminToken = "";
 IPAddress apIP(192, 168, 4, 1);
 IPAddress apGateway(192, 168, 4, 1);
 IPAddress apSubnet(255, 255, 255, 0);
@@ -178,6 +178,7 @@ String uptimeString() {
 void loadSettings();
 void saveSettings();
 void resetDefaultSettings();
+void initCredentialDefaults();
 
 void initSensors();
 void initDisplay();
@@ -215,6 +216,7 @@ void setup() {
   Serial.begin(115200);
   sysData.bootMs = millis();
 
+  initCredentialDefaults();
   loadSettings();
   Wire.begin(pins.i2cSDA, pins.i2cSCL);
 
@@ -294,34 +296,41 @@ void initSensors() {
 }
 
 void initDisplay() {
+  if (tft == nullptr) {
+    tft = new Adafruit_ILI9341(&tftSPI, pins.tftDC, pins.tftCS, pins.tftRST);
+  }
+  if (tft == nullptr) {
+    return;
+  }
+
   tftSPI.begin(pins.tftSCK, pins.tftMISO, pins.tftMOSI, pins.tftCS);
-  tft.begin();
-  tft.setRotation(1);
-  tft.fillScreen(ILI9341_BLACK);
+  tft->begin();
+  tft->setRotation(1);
+  tft->fillScreen(ILI9341_BLACK);
 
-  tft.setTextColor(ILI9341_CYAN);
-  tft.setTextSize(2);
-  tft.setCursor(10, 8);
-  tft.print("SHIP INCLINOMETER");
+  tft->setTextColor(ILI9341_CYAN);
+  tft->setTextSize(2);
+  tft->setCursor(10, 8);
+  tft->print("SHIP INCLINOMETER");
 
-  tft.drawFastHLine(0, 28, 320, ILI9341_DARKCYAN);
-  tft.setTextSize(1);
-  tft.setTextColor(ILI9341_WHITE);
+  tft->drawFastHLine(0, 28, 320, ILI9341_DARKCYAN);
+  tft->setTextSize(1);
+  tft->setTextColor(ILI9341_WHITE);
 
-  tft.setCursor(10, 36);
-  tft.print("ROLL");
-  tft.setCursor(170, 36);
-  tft.print("PITCH");
+  tft->setCursor(10, 36);
+  tft->print("ROLL");
+  tft->setCursor(170, 36);
+  tft->print("PITCH");
 
-  tft.setCursor(10, 102);
-  tft.print("ADXL ROLL:");
-  tft.setCursor(170, 102);
-  tft.print("ADXL PITCH:");
+  tft->setCursor(10, 102);
+  tft->print("ADXL ROLL:");
+  tft->setCursor(170, 102);
+  tft->print("ADXL PITCH:");
 
-  tft.setCursor(10, 118);
-  tft.print("DIFF R/P:");
-  tft.setCursor(10, 134);
-  tft.print("STATUS:");
+  tft->setCursor(10, 118);
+  tft->print("DIFF R/P:");
+  tft->setCursor(10, 134);
+  tft->print("STATUS:");
 }
 
 void initWiFiAP() {
@@ -331,6 +340,8 @@ void initWiFiAP() {
 }
 
 void initWebServer() {
+  const char *headerKeys[] = {"X-Admin-Token"};
+  server.collectHeaders(headerKeys, 1);
   server.on("/", HTTP_GET, handleRoot);
   server.on("/api/data", HTTP_GET, handleData);
   server.on("/api/settings", HTTP_GET, handleSettingsGet);
@@ -511,33 +522,39 @@ void validateSensors() {
     return;
   }
 
-  if (!mpu.healthy || !adxl.healthy) {
+  if (!mpu.healthy) {
     sysData.rollDiff = 0.0f;
     sysData.pitchDiff = 0.0f;
     sysData.state = STATE_SENSOR_ERROR;
     return;
   }
-
-  sysData.rollDiff = fabsf(mpu.roll - adxl.roll);
-  sysData.pitchDiff = fabsf(mpu.pitch - adxl.pitch);
-
-  if (sysData.rollDiff > cfg.diffThreshold || sysData.pitchDiff > cfg.diffThreshold) {
-    sysData.state = STATE_SENSOR_WARNING;
-    return;
-  }
-
   float absRoll = fabsf(mpu.roll);
   float absPitch = fabsf(mpu.pitch);
   bool danger = absRoll >= cfg.rollDanger || absPitch >= cfg.pitchDanger;
   bool warning = absRoll >= cfg.rollWarning || absPitch >= cfg.pitchWarning;
 
+  SystemState tiltState = STATE_NORMAL;
   if (danger) {
-    sysData.state = STATE_DANGER;
+    tiltState = STATE_DANGER;
   } else if (warning) {
-    sysData.state = STATE_WARNING;
-  } else {
-    sysData.state = STATE_NORMAL;
+    tiltState = STATE_WARNING;
   }
+
+  if (!adxl.healthy) {
+    sysData.rollDiff = 0.0f;
+    sysData.pitchDiff = 0.0f;
+    sysData.state = (tiltState == STATE_DANGER) ? STATE_DANGER : STATE_SENSOR_WARNING;
+    return;
+  }
+
+  sysData.rollDiff = fabsf(mpu.roll - adxl.roll);
+  sysData.pitchDiff = fabsf(mpu.pitch - adxl.pitch);
+  if (sysData.rollDiff > cfg.diffThreshold || sysData.pitchDiff > cfg.diffThreshold) {
+    sysData.state = STATE_SENSOR_WARNING;
+    return;
+  }
+
+  sysData.state = tiltState;
 }
 
 void checkAlarm() {
@@ -562,22 +579,22 @@ void checkAlarm() {
 
 void drawGauge(int16_t x, int16_t y, int16_t w, int16_t h, float value, float warn, float danger, bool force = false) {
   if (force) {
-    tft.drawRect(x, y, w, h, ILI9341_DARKGREY);
+    tft->drawRect(x, y, w, h, ILI9341_DARKGREY);
   }
 
   int16_t center = x + (w / 2);
   int16_t markerHalf = 2;
   int16_t markerH = h - 4;
 
-  tft.fillRect(x + 1, y + 1, w - 2, h - 2, ILI9341_BLACK);
+  tft->fillRect(x + 1, y + 1, w - 2, h - 2, ILI9341_BLACK);
 
   int16_t warnPx = (int16_t)((warn / danger) * (w / 2));
   if (warnPx < 0) warnPx = 0;
   if (warnPx > w / 2) warnPx = w / 2;
 
-  tft.fillRect(center - (w / 2) + 1, y + 1, (w / 2) - warnPx, h - 2, ILI9341_DARKGREEN);
-  tft.fillRect(center - warnPx, y + 1, warnPx * 2, h - 2, tft.color565(140, 110, 0));
-  tft.fillRect(center + warnPx, y + 1, (w / 2) - warnPx - 1, h - 2, tft.color565(110, 20, 20));
+  tft->fillRect(center - (w / 2) + 1, y + 1, (w / 2) - warnPx, h - 2, ILI9341_DARKGREEN);
+  tft->fillRect(center - warnPx, y + 1, warnPx * 2, h - 2, tft->color565(140, 110, 0));
+  tft->fillRect(center + warnPx, y + 1, (w / 2) - warnPx - 1, h - 2, tft->color565(110, 20, 20));
 
   float clamped = value;
   if (clamped > danger) clamped = danger;
@@ -587,11 +604,15 @@ void drawGauge(int16_t x, int16_t y, int16_t w, int16_t h, float value, float wa
   if (marker < x + 2) marker = x + 2;
   if (marker > x + w - 3) marker = x + w - 3;
 
-  tft.fillRect(marker - markerHalf, y + 2, markerHalf * 2, markerH, ILI9341_WHITE);
-  tft.drawFastVLine(center, y + 1, h - 2, ILI9341_LIGHTGREY);
+  tft->fillRect(marker - markerHalf, y + 2, markerHalf * 2, markerH, ILI9341_WHITE);
+  tft->drawFastVLine(center, y + 1, h - 2, ILI9341_LIGHTGREY);
 }
 
 void updateTFT(bool force) {
+  if (tft == nullptr) {
+    return;
+  }
+
   static float pRoll = NAN, pPitch = NAN, pAdxlRoll = NAN, pAdxlPitch = NAN;
   static float pDR = NAN, pDP = NAN;
   static String pRS, pPS, pStatus;
@@ -602,76 +623,76 @@ void updateTFT(bool force) {
   };
 
   if (force || changedF(mpu.roll, pRoll) || pCal != sysData.calibrating) {
-    tft.fillRect(10, 50, 140, 24, ILI9341_BLACK);
-    tft.setTextSize(3);
-    tft.setTextColor(ILI9341_WHITE);
-    tft.setCursor(10, 52);
-    tft.print(formatSigned(mpu.roll));
-    tft.print((char)247);
+    tft->fillRect(10, 50, 140, 24, ILI9341_BLACK);
+    tft->setTextSize(3);
+    tft->setTextColor(ILI9341_WHITE);
+    tft->setCursor(10, 52);
+    tft->print(formatSigned(mpu.roll));
+    tft->print((char)247);
     pRoll = mpu.roll;
   }
 
   if (force || changedF(mpu.pitch, pPitch) || pCal != sysData.calibrating) {
-    tft.fillRect(170, 50, 140, 24, ILI9341_BLACK);
-    tft.setTextSize(3);
-    tft.setTextColor(ILI9341_WHITE);
-    tft.setCursor(170, 52);
-    tft.print(formatSigned(mpu.pitch));
-    tft.print((char)247);
+    tft->fillRect(170, 50, 140, 24, ILI9341_BLACK);
+    tft->setTextSize(3);
+    tft->setTextColor(ILI9341_WHITE);
+    tft->setCursor(170, 52);
+    tft->print(formatSigned(mpu.pitch));
+    tft->print((char)247);
     pPitch = mpu.pitch;
   }
 
   if (force || pRS != sysData.rollDirection) {
-    tft.fillRect(10, 78, 140, 14, ILI9341_BLACK);
-    tft.setTextSize(1);
-    tft.setTextColor(ILI9341_CYAN);
-    tft.setCursor(10, 80);
-    tft.print(sysData.rollDirection);
+    tft->fillRect(10, 78, 140, 14, ILI9341_BLACK);
+    tft->setTextSize(1);
+    tft->setTextColor(ILI9341_CYAN);
+    tft->setCursor(10, 80);
+    tft->print(sysData.rollDirection);
     pRS = sysData.rollDirection;
   }
 
   if (force || pPS != sysData.pitchDirection) {
-    tft.fillRect(170, 78, 140, 14, ILI9341_BLACK);
-    tft.setTextSize(1);
-    tft.setTextColor(ILI9341_CYAN);
-    tft.setCursor(170, 80);
-    tft.print(sysData.pitchDirection);
+    tft->fillRect(170, 78, 140, 14, ILI9341_BLACK);
+    tft->setTextSize(1);
+    tft->setTextColor(ILI9341_CYAN);
+    tft->setCursor(170, 80);
+    tft->print(sysData.pitchDirection);
     pPS = sysData.pitchDirection;
   }
 
   if (force || changedF(adxl.roll, pAdxlRoll)) {
-    tft.fillRect(85, 102, 70, 8, ILI9341_BLACK);
-    tft.setTextColor(ILI9341_WHITE);
-    tft.setCursor(85, 102);
-    tft.print(formatSigned(adxl.roll));
+    tft->fillRect(85, 102, 70, 8, ILI9341_BLACK);
+    tft->setTextColor(ILI9341_WHITE);
+    tft->setCursor(85, 102);
+    tft->print(formatSigned(adxl.roll));
     pAdxlRoll = adxl.roll;
   }
 
   if (force || changedF(adxl.pitch, pAdxlPitch)) {
-    tft.fillRect(245, 102, 70, 8, ILI9341_BLACK);
-    tft.setTextColor(ILI9341_WHITE);
-    tft.setCursor(245, 102);
-    tft.print(formatSigned(adxl.pitch));
+    tft->fillRect(245, 102, 70, 8, ILI9341_BLACK);
+    tft->setTextColor(ILI9341_WHITE);
+    tft->setCursor(245, 102);
+    tft->print(formatSigned(adxl.pitch));
     pAdxlPitch = adxl.pitch;
   }
 
   if (force || changedF(sysData.rollDiff, pDR) || changedF(sysData.pitchDiff, pDP)) {
-    tft.fillRect(65, 118, 150, 8, ILI9341_BLACK);
-    tft.setTextColor(ILI9341_WHITE);
-    tft.setCursor(65, 118);
-    tft.print(formatSigned(sysData.rollDiff));
-    tft.print("/");
-    tft.print(formatSigned(sysData.pitchDiff));
+    tft->fillRect(65, 118, 150, 8, ILI9341_BLACK);
+    tft->setTextColor(ILI9341_WHITE);
+    tft->setCursor(65, 118);
+    tft->print(formatSigned(sysData.rollDiff));
+    tft->print("/");
+    tft->print(formatSigned(sysData.pitchDiff));
     pDR = sysData.rollDiff;
     pDP = sysData.pitchDiff;
   }
 
   String s = sysData.calibrating ? "CALIBRATING" : statusText(sysData.state);
   if (force || pStatus != s || pCal != sysData.calibrating) {
-    tft.fillRect(60, 134, 250, 10, ILI9341_BLACK);
-    tft.setTextColor(statusColor(sysData.state));
-    tft.setCursor(60, 134);
-    tft.print(s);
+    tft->fillRect(60, 134, 250, 10, ILI9341_BLACK);
+    tft->setTextColor(statusColor(sysData.state));
+    tft->setCursor(60, 134);
+    tft->print(s);
     pStatus = s;
     pCal = sysData.calibrating;
   }
@@ -679,14 +700,14 @@ void updateTFT(bool force) {
   drawGauge(10, 160, 300, 24, mpu.roll, cfg.rollWarning, cfg.rollDanger, force);
   drawGauge(10, 198, 300, 24, mpu.pitch, cfg.pitchWarning, cfg.pitchDanger, force);
 
-  tft.setTextSize(1);
-  tft.setTextColor(ILI9341_WHITE);
-  tft.fillRect(10, 224, 310, 12, ILI9341_BLACK);
-  tft.setCursor(10, 226);
-  tft.print("AP ");
-  tft.print(AP_SSID);
-  tft.print(" ");
-  tft.print(WiFi.softAPIP());
+  tft->setTextSize(1);
+  tft->setTextColor(ILI9341_WHITE);
+  tft->fillRect(10, 224, 310, 12, ILI9341_BLACK);
+  tft->setCursor(10, 226);
+  tft->print("AP ");
+  tft->print(AP_SSID);
+  tft->print(" ");
+  tft->print(WiFi.softAPIP());
 }
 
 void updateWebData() {
@@ -729,9 +750,13 @@ void loadSettings() {
 
   if (pwd.length() >= 8) {
     apPassword = pwd;
+  } else {
+    apPassword = defaultApPassword;
   }
   if (token.length() >= 8) {
     adminToken = token;
+  } else {
+    adminToken = defaultAdminToken;
   }
 
   cfg.complementaryAlpha = constrain(cfg.complementaryAlpha, 0.70f, 0.995f);
@@ -759,6 +784,17 @@ void resetDefaultSettings() {
   adminToken = defaultAdminToken;
 }
 
+void initCredentialDefaults() {
+  uint64_t mac = ESP.getEfuseMac();
+  char suffix[9];
+  snprintf(suffix, sizeof(suffix), "%08llX", (unsigned long long)(mac & 0xFFFFFFFFULL));
+
+  defaultApPassword = String("Ship-") + suffix;
+  defaultAdminToken = String("Admin-") + suffix;
+  apPassword = defaultApPassword;
+  adminToken = defaultAdminToken;
+}
+
 String jsonEscape(const String &input) {
   String out;
   out.reserve(input.length() + 8);
@@ -775,7 +811,7 @@ String jsonEscape(const String &input) {
 }
 
 bool isAuthorized() {
-  return server.hasArg("adminToken") && server.arg("adminToken") == adminToken;
+  return server.hasHeader("X-Admin-Token") && server.header("X-Admin-Token") == adminToken;
 }
 
 bool tryParseFloatArg(const char *name, float &outValue) {
@@ -1154,8 +1190,7 @@ async function updateData(){
 
 async function post(path,params){
   const body=new URLSearchParams(params||{});
-  body.set('adminToken',byId('adminToken').value||'');
-  const r=await fetch(path,{method:'POST',body});
+  const r=await fetch(path,{method:'POST',headers:{'X-Admin-Token':byId('adminToken').value||''},body});
   return r;
 }
 
