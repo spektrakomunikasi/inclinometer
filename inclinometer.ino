@@ -178,6 +178,14 @@ float safeAtan2Deg(float y, float x) {
   return v;
 }
 
+float adxlRollAligned() {
+  return adxlState.roll + cal.adxlRollAlign;
+}
+
+float adxlPitchAligned() {
+  return adxlState.pitch + cal.adxlPitchAlign;
+}
+
 float clampf(float v, float lo, float hi) {
   if (v < lo) return lo;
   if (v > hi) return hi;
@@ -238,13 +246,7 @@ bool tokenOkAdminPage() {
 }
 
 bool tokenOkApi() {
-  if (server.hasHeader("X-Admin-Token")) {
-    return server.header("X-Admin-Token") == adminToken;
-  }
-  if (server.method() == HTTP_POST && server.hasArg("token")) {
-    return server.arg("token") == adminToken;
-  }
-  return false;
+  return server.hasHeader("X-Admin-Token") && (server.header("X-Admin-Token") == adminToken);
 }
 
 bool originAllowed() {
@@ -385,8 +387,8 @@ String statusLevel() {
   float diffP = NAN;
   bool bothValid = mpuState.healthy && adxlState.healthy;
   if (bothValid) {
-    diffR = fabsf(mpuState.roll - (adxlState.roll + cal.adxlRollAlign));
-    diffP = fabsf(mpuState.pitch - (adxlState.pitch + cal.adxlPitchAlign));
+    diffR = fabsf(mpuState.roll - adxlRollAligned());
+    diffP = fabsf(mpuState.pitch - adxlPitchAligned());
   }
 
   float dynamicScale = 1.0f + (1.0f - accelConfidence) * 1.5f;
@@ -655,8 +657,6 @@ void readSensorsTask() {
   if (mpuState.healthy) computeAnglesFromAccel(mpuState);
   if (adxlState.healthy) {
     computeAnglesFromAccel(adxlState);
-    adxlState.roll += cal.adxlRollAlign;
-    adxlState.pitch += cal.adxlPitchAlign;
   }
 }
 
@@ -769,13 +769,13 @@ void serialTask() {
   Serial.printf("MPU6050 present=%d healthy=%d acc[g]=(%.3f,%.3f,%.3f) gyro[dps]=(%.3f,%.3f,%.3f) roll=%.2f pitch=%.2f\n",
                 mpuState.present, mpuState.healthy, mpuState.ax, mpuState.ay, mpuState.az, mpuState.gx, mpuState.gy, mpuState.gz, mpuState.roll, mpuState.pitch);
   Serial.printf("ADXL345 present=%d healthy=%d acc[g]=(%.3f,%.3f,%.3f) roll=%.2f pitch=%.2f\n",
-                adxlState.present, adxlState.healthy, adxlState.ax, adxlState.ay, adxlState.az, adxlState.roll, adxlState.pitch);
+                adxlState.present, adxlState.healthy, adxlState.ax, adxlState.ay, adxlState.az, adxlRollAligned(), adxlPitchAligned());
 
   float diffR = NAN;
   float diffP = NAN;
   if (mpuState.healthy && adxlState.healthy) {
-    diffR = fabsf(mpuState.roll - adxlState.roll);
-    diffP = fabsf(mpuState.pitch - adxlState.pitch);
+    diffR = fabsf(mpuState.roll - adxlRollAligned());
+    diffP = fabsf(mpuState.pitch - adxlPitchAligned());
   }
   Serial.printf("DIFF roll=%.2f pitch=%.2f accel_conf=%.2f status=%s uptime=%s\n", diffR, diffP, accelConfidence, sysState.systemStatus.c_str(), uptimeString().c_str());
 }
@@ -867,8 +867,8 @@ String buildDataJson() {
   float diffRoll = NAN;
   float diffPitch = NAN;
   if (mpuState.healthy && adxlState.healthy) {
-    diffRoll = fabsf(mpuState.roll - adxlState.roll);
-    diffPitch = fabsf(mpuState.pitch - adxlState.pitch);
+    diffRoll = fabsf(mpuState.roll - adxlRollAligned());
+    diffPitch = fabsf(mpuState.pitch - adxlPitchAligned());
   }
 
   String j;
@@ -887,7 +887,7 @@ String buildDataJson() {
 
   j += ",\"adxl\":{";
   j += "\"ax\":" + fmtf(adxlState.ax, 4) + ",\"ay\":" + fmtf(adxlState.ay, 4) + ",\"az\":" + fmtf(adxlState.az, 4);
-  j += ",\"roll\":" + fmtf(adxlState.roll, 3) + ",\"pitch\":" + fmtf(adxlState.pitch, 3);
+  j += ",\"roll\":" + fmtf(adxlRollAligned(), 3) + ",\"pitch\":" + fmtf(adxlPitchAligned(), 3);
   j += ",\"status\":\"" + sensorStatusString(adxlState) + "\"}";
 
   j += ",\"diff\":{\"roll\":" + fmtf(diffRoll, 3) + ",\"pitch\":" + fmtf(diffPitch, 3) + "}";
