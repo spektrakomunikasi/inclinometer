@@ -1177,11 +1177,14 @@ String randomToken() {
 }
 
 bool isValidAdminTokenFormat(const String &v) {
-  // Persisted token format must stay: ADMIN_TOKEN_PREFIX + (2 * ADMIN_TOKEN_RANDOM_BYTES) uppercase hex chars.
+  // Persisted token formats:
+  // - current: ADMIN_TOKEN_PREFIX + (2 * ADMIN_TOKEN_RANDOM_BYTES) uppercase hex chars
+  // - legacy:  ADMIN_TOKEN_PREFIX + 32 uppercase hex chars
   const size_t prefixLen = strlen(ADMIN_TOKEN_PREFIX);
   const size_t expectedLen = prefixLen + (ADMIN_TOKEN_RANDOM_BYTES * 2);
+  const size_t legacyLen = prefixLen + 32;
   if (!v.startsWith(ADMIN_TOKEN_PREFIX)) return false;
-  if (v.length() != expectedLen) return false;
+  if (v.length() != expectedLen && v.length() != legacyLen) return false;
   for (size_t i = prefixLen; i < v.length(); i++) {
     char c = v[i];
     bool hexDigit = (c >= '0' && c <= '9') || (c >= 'A' && c <= 'F');
