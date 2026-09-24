@@ -254,7 +254,12 @@ bool originAllowed() {
   String origin = server.header("Origin");
   if (origin.length() == 0) return false;
   String ipOrigin = String("http://") + WiFi.softAPIP().toString();
-  if (origin == ipOrigin || origin == ipOrigin + "/") return true;
+  if (origin == ipOrigin || origin == ipOrigin + "/" || origin == ipOrigin + ":80" || origin == ipOrigin + ":80/") return true;
+  String host = server.hostHeader();
+  if (host.length() > 0) {
+    String hostOrigin = String("http://") + host;
+    if (origin == hostOrigin || origin == hostOrigin + "/") return true;
+  }
   return false;
 }
 
@@ -675,8 +680,8 @@ void filterTask() {
     accelPitch = mpuState.pitch;
     hasAccel = true;
   } else if (adxlState.healthy) {
-    accelRoll = adxlState.roll;
-    accelPitch = adxlState.pitch;
+    accelRoll = adxlRollAligned();
+    accelPitch = adxlPitchAligned();
     hasAccel = true;
   }
 
