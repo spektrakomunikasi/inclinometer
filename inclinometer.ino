@@ -8,6 +8,7 @@
 #include <Adafruit_MPU6050.h>
 #include <Adafruit_ADXL345_U.h>
 #include <Adafruit_Sensor.h>
+#include <esp_system.h>
 #include <math.h>
 
 // ========================= CONFIGURATION =========================
@@ -113,7 +114,9 @@ SystemData sysData;
 Adafruit_MPU6050 mpu6050;
 Adafruit_ADXL345_Unified adxl345(12345);
 SPIClass tftSPI(VSPI);
-Adafruit_ILI9341 *tft = nullptr;
+Adafruit_ILI9341 tft(&tftSPI, DEFAULT_TFT_DC, DEFAULT_TFT_CS, DEFAULT_TFT_RST);
+bool tftHealthy = false;
+bool wifiApHealthy = false;
 WebServer server(80);
 Preferences preferences;
 String webDataCache = "{}";
@@ -183,7 +186,7 @@ void initCredentialDefaults();
 void initSensors();
 void initDisplay();
 void initWiFiAP();
-void applyAccessPointConfig();
+bool applyAccessPointConfig();
 void initWebServer();
 
 bool calibrateSensors();
@@ -228,6 +231,10 @@ void setup() {
   initDisplay();
   initWiFiAP();
   initWebServer();
+
+  Serial.printf("AP SSID: %s\n", AP_SSID);
+  Serial.printf("AP Password: %s\n", apPassword.c_str());
+  Serial.printf("Admin Token: %s\n", adminToken.c_str());
 
   if (cfg.startupCalibration) {
     calibrateSensors();
@@ -300,56 +307,52 @@ void initSensors() {
 }
 
 void initDisplay() {
-  if (tft == nullptr) {
-    tft = new Adafruit_ILI9341(&tftSPI, pins.tftDC, pins.tftCS, pins.tftRST);
-  }
-  if (tft == nullptr) {
-    return;
-  }
-
   tftSPI.begin(pins.tftSCK, pins.tftMISO, pins.tftMOSI, pins.tftCS);
-  tft->begin();
-  tft->setRotation(1);
-  tft->fillScreen(ILI9341_BLACK);
+  tft.begin();
+  tft.setRotation(1);
+  tft.fillScreen(ILI9341_BLACK);
+  tftHealthy = true;
 
-  tft->setTextColor(ILI9341_CYAN);
-  tft->setTextSize(2);
-  tft->setCursor(10, 8);
-  tft->print("SHIP INCLINOMETER");
+  tft.setTextColor(ILI9341_CYAN);
+  tft.setTextSize(2);
+  tft.setCursor(10, 8);
+  tft.print("SHIP INCLINOMETER");
 
-  tft->drawFastHLine(0, 28, 320, ILI9341_DARKCYAN);
-  tft->setTextSize(1);
-  tft->setTextColor(ILI9341_WHITE);
+  tft.drawFastHLine(0, 28, 320, ILI9341_DARKCYAN);
+  tft.setTextSize(1);
+  tft.setTextColor(ILI9341_WHITE);
 
-  tft->setCursor(10, 36);
-  tft->print("ROLL");
-  tft->setCursor(170, 36);
-  tft->print("PITCH");
+  tft.setCursor(10, 36);
+  tft.print("ROLL");
+  tft.setCursor(170, 36);
+  tft.print("PITCH");
 
-  tft->setCursor(10, 102);
-  tft->print("ADXL ROLL:");
-  tft->setCursor(170, 102);
-  tft->print("ADXL PITCH:");
+  tft.setCursor(10, 102);
+  tft.print("ADXL ROLL:");
+  tft.setCursor(170, 102);
+  tft.print("ADXL PITCH:");
 
-  tft->setCursor(10, 118);
-  tft->print("DIFF R/P:");
-  tft->setCursor(10, 134);
-  tft->print("STATUS:");
+  tft.setCursor(10, 118);
+  tft.print("DIFF R/P:");
+  tft.setCursor(10, 134);
+  tft.print("STATUS:");
 }
 
 void initWiFiAP() {
   WiFi.mode(WIFI_AP);
-  applyAccessPointConfig();
+  wifiApHealthy = applyAccessPointConfig();
 }
 
-void applyAccessPointConfig() {
+bool applyAccessPointConfig() {
   WiFi.softAPdisconnect(true);
-  WiFi.softAPConfig(apIP, apGateway, apSubnet);
+  bool configOk = WiFi.softAPConfig(apIP, apGateway, apSubnet);
+  bool apOk = false;
   if (apPassword.length() == 0) {
-    WiFi.softAP(AP_SSID);
+    apOk = WiFi.softAP(AP_SSID);
   } else {
-    WiFi.softAP(AP_SSID, apPassword.c_str());
+    apOk = WiFi.softAP(AP_SSID, apPassword.c_str());
   }
+  return configOk && apOk;
 }
 
 void initWebServer() {
@@ -635,22 +638,22 @@ void checkAlarm() {
 
 void drawGauge(int16_t x, int16_t y, int16_t w, int16_t h, float value, float warn, float danger, bool force = false) {
   if (force) {
-    tft->drawRect(x, y, w, h, ILI9341_DARKGREY);
+    tft.drawRect(x, y, w, h, ILI9341_DARKGREY);
   }
 
   int16_t center = x + (w / 2);
   int16_t markerHalf = 2;
   int16_t markerH = h - 4;
 
-  tft->fillRect(x + 1, y + 1, w - 2, h - 2, ILI9341_BLACK);
+  tft.fillRect(x + 1, y + 1, w - 2, h - 2, ILI9341_BLACK);
 
   int16_t warnPx = (int16_t)((warn / danger) * (w / 2));
   if (warnPx < 0) warnPx = 0;
   if (warnPx > w / 2) warnPx = w / 2;
 
-  tft->fillRect(center - (w / 2) + 1, y + 1, (w / 2) - warnPx, h - 2, ILI9341_DARKGREEN);
-  tft->fillRect(center - warnPx, y + 1, warnPx * 2, h - 2, tft->color565(140, 110, 0));
-  tft->fillRect(center + warnPx, y + 1, (w / 2) - warnPx - 1, h - 2, tft->color565(110, 20, 20));
+  tft.fillRect(center - (w / 2) + 1, y + 1, (w / 2) - warnPx, h - 2, ILI9341_DARKGREEN);
+  tft.fillRect(center - warnPx, y + 1, warnPx * 2, h - 2, tft.color565(140, 110, 0));
+  tft.fillRect(center + warnPx, y + 1, (w / 2) - warnPx - 1, h - 2, tft.color565(110, 20, 20));
 
   float clamped = value;
   if (clamped > danger) clamped = danger;
@@ -660,12 +663,12 @@ void drawGauge(int16_t x, int16_t y, int16_t w, int16_t h, float value, float wa
   if (marker < x + 2) marker = x + 2;
   if (marker > x + w - 3) marker = x + w - 3;
 
-  tft->fillRect(marker - markerHalf, y + 2, markerHalf * 2, markerH, ILI9341_WHITE);
-  tft->drawFastVLine(center, y + 1, h - 2, ILI9341_LIGHTGREY);
+  tft.fillRect(marker - markerHalf, y + 2, markerHalf * 2, markerH, ILI9341_WHITE);
+  tft.drawFastVLine(center, y + 1, h - 2, ILI9341_LIGHTGREY);
 }
 
 void updateTFT(bool force) {
-  if (tft == nullptr) {
+  if (!tftHealthy) {
     return;
   }
 
@@ -679,66 +682,66 @@ void updateTFT(bool force) {
   };
 
   if (force || changedF(mpu.roll, pRoll) || pCal != sysData.calibrating) {
-    tft->fillRect(10, 50, 140, 24, ILI9341_BLACK);
-    tft->setTextSize(3);
-    tft->setTextColor(ILI9341_WHITE);
-    tft->setCursor(10, 52);
-    tft->print(formatSigned(mpu.roll));
-    tft->print((char)247);
+    tft.fillRect(10, 50, 140, 24, ILI9341_BLACK);
+    tft.setTextSize(3);
+    tft.setTextColor(ILI9341_WHITE);
+    tft.setCursor(10, 52);
+    tft.print(formatSigned(mpu.roll));
+    tft.print((char)247);
     pRoll = mpu.roll;
   }
 
   if (force || changedF(mpu.pitch, pPitch) || pCal != sysData.calibrating) {
-    tft->fillRect(170, 50, 140, 24, ILI9341_BLACK);
-    tft->setTextSize(3);
-    tft->setTextColor(ILI9341_WHITE);
-    tft->setCursor(170, 52);
-    tft->print(formatSigned(mpu.pitch));
-    tft->print((char)247);
+    tft.fillRect(170, 50, 140, 24, ILI9341_BLACK);
+    tft.setTextSize(3);
+    tft.setTextColor(ILI9341_WHITE);
+    tft.setCursor(170, 52);
+    tft.print(formatSigned(mpu.pitch));
+    tft.print((char)247);
     pPitch = mpu.pitch;
   }
 
   if (force || pRS != sysData.rollDirection) {
-    tft->fillRect(10, 78, 140, 14, ILI9341_BLACK);
-    tft->setTextSize(1);
-    tft->setTextColor(ILI9341_CYAN);
-    tft->setCursor(10, 80);
-    tft->print(sysData.rollDirection);
+    tft.fillRect(10, 78, 140, 14, ILI9341_BLACK);
+    tft.setTextSize(1);
+    tft.setTextColor(ILI9341_CYAN);
+    tft.setCursor(10, 80);
+    tft.print(sysData.rollDirection);
     pRS = sysData.rollDirection;
   }
 
   if (force || pPS != sysData.pitchDirection) {
-    tft->fillRect(170, 78, 140, 14, ILI9341_BLACK);
-    tft->setTextSize(1);
-    tft->setTextColor(ILI9341_CYAN);
-    tft->setCursor(170, 80);
-    tft->print(sysData.pitchDirection);
+    tft.fillRect(170, 78, 140, 14, ILI9341_BLACK);
+    tft.setTextSize(1);
+    tft.setTextColor(ILI9341_CYAN);
+    tft.setCursor(170, 80);
+    tft.print(sysData.pitchDirection);
     pPS = sysData.pitchDirection;
   }
 
   if (force || changedF(adxl.roll, pAdxlRoll)) {
-    tft->fillRect(85, 102, 70, 8, ILI9341_BLACK);
-    tft->setTextColor(ILI9341_WHITE);
-    tft->setCursor(85, 102);
-    tft->print(formatSigned(adxl.roll));
+    tft.fillRect(85, 102, 70, 8, ILI9341_BLACK);
+    tft.setTextColor(ILI9341_WHITE);
+    tft.setCursor(85, 102);
+    tft.print(formatSigned(adxl.roll));
     pAdxlRoll = adxl.roll;
   }
 
   if (force || changedF(adxl.pitch, pAdxlPitch)) {
-    tft->fillRect(245, 102, 70, 8, ILI9341_BLACK);
-    tft->setTextColor(ILI9341_WHITE);
-    tft->setCursor(245, 102);
-    tft->print(formatSigned(adxl.pitch));
+    tft.fillRect(245, 102, 70, 8, ILI9341_BLACK);
+    tft.setTextColor(ILI9341_WHITE);
+    tft.setCursor(245, 102);
+    tft.print(formatSigned(adxl.pitch));
     pAdxlPitch = adxl.pitch;
   }
 
   if (force || changedF(sysData.rollDiff, pDR) || changedF(sysData.pitchDiff, pDP)) {
-    tft->fillRect(65, 118, 150, 8, ILI9341_BLACK);
-    tft->setTextColor(ILI9341_WHITE);
-    tft->setCursor(65, 118);
-    tft->print(formatSigned(sysData.rollDiff));
-    tft->print("/");
-    tft->print(formatSigned(sysData.pitchDiff));
+    tft.fillRect(65, 118, 150, 8, ILI9341_BLACK);
+    tft.setTextColor(ILI9341_WHITE);
+    tft.setCursor(65, 118);
+    tft.print(formatSigned(sysData.rollDiff));
+    tft.print("/");
+    tft.print(formatSigned(sysData.pitchDiff));
     pDR = sysData.rollDiff;
     pDP = sysData.pitchDiff;
   }
@@ -746,10 +749,10 @@ void updateTFT(bool force) {
   String s = sysData.calibrating ? "CALIBRATING" : statusText(sysData.state);
   if (force || pStatus != s || pCal != sysData.calibrating) {
     uint16_t color = sysData.calibrating ? ILI9341_CYAN : statusColor(sysData.state);
-    tft->fillRect(60, 134, 250, 10, ILI9341_BLACK);
-    tft->setTextColor(color);
-    tft->setCursor(60, 134);
-    tft->print(s);
+    tft.fillRect(60, 134, 250, 10, ILI9341_BLACK);
+    tft.setTextColor(color);
+    tft.setCursor(60, 134);
+    tft.print(s);
     pStatus = s;
     pCal = sysData.calibrating;
   }
@@ -757,14 +760,14 @@ void updateTFT(bool force) {
   drawGauge(10, 160, 300, 24, mpu.roll, cfg.rollWarning, cfg.rollDanger, force);
   drawGauge(10, 198, 300, 24, mpu.pitch, cfg.pitchWarning, cfg.pitchDanger, force);
 
-  tft->setTextSize(1);
-  tft->setTextColor(ILI9341_WHITE);
-  tft->fillRect(10, 224, 310, 12, ILI9341_BLACK);
-  tft->setCursor(10, 226);
-  tft->print("AP ");
-  tft->print(AP_SSID);
-  tft->print(" ");
-  tft->print(WiFi.softAPIP());
+  tft.setTextSize(1);
+  tft.setTextColor(ILI9341_WHITE);
+  tft.fillRect(10, 224, 310, 12, ILI9341_BLACK);
+  tft.setCursor(10, 226);
+  tft.print("AP ");
+  tft.print(AP_SSID);
+  tft.print(" ");
+  tft.print(WiFi.softAPIP());
 }
 
 void updateWebData() {
@@ -792,6 +795,7 @@ void updateSerial() {
 }
 
 void loadSettings() {
+  bool needPersistDefaults = false;
   preferences.begin("inclino", true);
   cfg.rollWarning = preferences.getFloat("rollWarn", cfg.rollWarning);
   cfg.rollDanger = preferences.getFloat("rollDanger", cfg.rollDanger);
@@ -809,14 +813,19 @@ void loadSettings() {
     apPassword = pwd;
   } else {
     apPassword = defaultApPassword;
+    needPersistDefaults = true;
   }
   if (token.length() >= 8) {
     adminToken = token;
   } else {
     adminToken = defaultAdminToken;
+    needPersistDefaults = true;
   }
 
   applyConfigConstraints();
+  if (needPersistDefaults) {
+    saveSettings();
+  }
 }
 
 void saveSettings() {
@@ -844,9 +853,13 @@ void initCredentialDefaults() {
   uint64_t mac = ESP.getEfuseMac();
   char suffix[9];
   snprintf(suffix, sizeof(suffix), "%08llX", (unsigned long long)(mac & 0xFFFFFFFFULL));
+  uint32_t r1 = esp_random();
+  uint32_t r2 = esp_random();
+  char tokenSuffix[17];
+  snprintf(tokenSuffix, sizeof(tokenSuffix), "%08lX%08lX", (unsigned long)r1, (unsigned long)r2);
 
   defaultApPassword = String("Ship-") + suffix;
-  defaultAdminToken = String("Admin-") + suffix;
+  defaultAdminToken = String("Admin-") + tokenSuffix;
   apPassword = defaultApPassword;
   adminToken = defaultAdminToken;
 }
@@ -899,13 +912,7 @@ bool tryParseUIntArg(const char *name, uint16_t &outValue) {
 }
 
 void applyConfigConstraints() {
-  cfg.rollWarning = fmaxf(0.1f, cfg.rollWarning);
-  cfg.rollDanger = fmaxf(cfg.rollWarning + 0.1f, cfg.rollDanger);
-  cfg.pitchWarning = fmaxf(0.1f, cfg.pitchWarning);
-  cfg.pitchDanger = fmaxf(cfg.pitchWarning + 0.1f, cfg.pitchDanger);
-  cfg.diffThreshold = fmaxf(0.1f, cfg.diffThreshold);
-  cfg.complementaryAlpha = constrain(cfg.complementaryAlpha, 0.70f, 0.995f);
-  cfg.webUpdateIntervalMs = constrain(cfg.webUpdateIntervalMs, (uint16_t)100, (uint16_t)1000);
+  applyConfigConstraints();
 }
 
 void handleRoot() {
@@ -913,8 +920,8 @@ void handleRoot() {
 }
 
 void handleAdmin() {
-  if (!server.hasArg("token") || server.arg("token") != adminToken) {
-    server.send(401, "text/plain", "Unauthorized. Open /admin?token=<admin-token>");
+  if (!server.authenticate("admin", adminToken.c_str())) {
+    server.requestAuthentication();
     return;
   }
   server.send(200, "text/html", webHtml(true));
@@ -966,7 +973,11 @@ String buildDataJson() {
   json += "\"wifi\":{";
   json += "\"ssid\":\"" + ssid + "\",";
   json += "\"ip\":\"" + ipStr + "\",";
-  json += "\"clients\":" + String(WiFi.softAPgetStationNum()) + "},";
+  json += "\"clients\":" + String(WiFi.softAPgetStationNum()) + ",";
+  json += "\"ok\":" + String(wifiApHealthy ? "true" : "false") + "},";
+
+  json += "\"system\":{";
+  json += "\"tftOk\":" + String(tftHealthy ? "true" : "false") + "},";
 
   json += "\"rates\":{";
   json += "\"loopHz\":" + String(sysData.loopRateHz, 1) + ",";
@@ -1041,12 +1052,18 @@ void handleSettingsPost() {
     String p = server.arg("apPassword");
     if (p.length() >= 8 && p.length() <= 63) {
       apPassword = p;
+    } else if (p.length() > 0) {
+      server.send(400, "application/json", "{\"ok\":false,\"reason\":\"invalid_ap_password_length\"}");
+      return;
     }
   }
   if (server.hasArg("newAdminToken")) {
     String p = server.arg("newAdminToken");
     if (p.length() >= 8 && p.length() <= 63) {
       adminToken = p;
+    } else if (p.length() > 0) {
+      server.send(400, "application/json", "{\"ok\":false,\"reason\":\"invalid_admin_token_length\"}");
+      return;
     }
   }
 
@@ -1059,7 +1076,7 @@ void handleSettingsPost() {
   cfg.webUpdateIntervalMs = constrain(cfg.webUpdateIntervalMs, (uint16_t)100, (uint16_t)1000);
 
   if (apPassword != oldApPassword) {
-    applyAccessPointConfig();
+    wifiApHealthy = applyAccessPointConfig();
   }
 
   saveSettings();
@@ -1081,7 +1098,7 @@ void handleReset() {
     return;
   }
   resetDefaultSettings();
-  applyAccessPointConfig();
+  wifiApHealthy = applyAccessPointConfig();
   saveSettings();
   server.send(200, "application/json", "{\"ok\":true}");
 }
@@ -1258,7 +1275,7 @@ async function updateData(){
     byId('flags').innerHTML=kv([
       ['MPU6050', d.mpu.detected?(d.mpu.healthy?'OK':'ERROR'):'NOT FOUND'],
       ['ADXL345', d.adxl.detected?(d.adxl.healthy?'OK':'ERROR'):'NOT FOUND'],
-      ['TFT', 'OK'], ['WiFi', 'OK'],
+      ['TFT', d.system.tftOk?'OK':'ERROR'], ['WiFi', d.wifi.ok?'OK':'ERROR'],
       ['Sensor Rate', `${d.rates.sensorMs} ms`],
       ['Filter Rate', `${d.rates.filterMs} ms`],
       ['TFT Rate', `${d.rates.tftMs} ms`],
@@ -1305,7 +1322,7 @@ if(hasAdmin){
     int end = html.indexOf("<!--ADMIN-END-->");
     if (start >= 0 && end > start) {
       end += String("<!--ADMIN-END-->").length();
-      String replacement = "<div class=\"card\" style=\"margin-top:12px\"><h3>SETTINGS</h3><div class=\"small\">Read-only page. Open <b>/admin?token=&lt;admin-token&gt;</b> to access configuration controls.</div></div>";
+      String replacement = "<div class=\"card\" style=\"margin-top:12px\"><h3>SETTINGS</h3><div class=\"small\">Read-only page. Open <b>/admin</b> and login to access configuration controls.</div></div>";
       html = html.substring(0, start) + replacement + html.substring(end);
     }
   }

@@ -65,7 +65,7 @@ Default:
 - SSID: `SHIP-INCLINOMETER`
 - IP AP: `192.168.4.1`
 - Password AP default otomatis unik per device: `Ship-XXXXXXXX` (XXXXXXXX = 8 digit hex dari MAC chip).
-- Admin token manajemen default otomatis unik per device: `Admin-XXXXXXXX`.
+- Admin token manajemen default otomatis acak saat boot pertama: `Admin-<16 HEX acak>` (langsung disimpan ke NVS).
 - Keduanya bisa diubah dari web settings.
 
 ## 7) Cara compile & upload
@@ -77,8 +77,9 @@ Default:
 ## 8) Cara membuka web dashboard
 1. Hubungkan HP/laptop ke Wi-Fi AP: `SHIP-INCLINOMETER`.
 2. Buka browser ke: `http://192.168.4.1` untuk dashboard telemetry (read-only).
-3. Untuk konfigurasi, buka: `http://192.168.4.1/admin?token=<admin-token>`.
+3. Untuk konfigurasi, buka: `http://192.168.4.1/admin` lalu login Basic Auth (username: `admin`, password: admin token aktif).
 4. Dashboard update realtime (polling JSON) tanpa internet/cloud.
+5. Cek Serial Monitor untuk melihat AP password dan admin token aktif.
 
 ## 9) Kalibrasi
 - Saat startup, jika `startupCalibration=true`, sistem mencoba kalibrasi otomatis saat sensor diam.
