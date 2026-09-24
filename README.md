@@ -94,6 +94,7 @@ Di panel web settings tersedia:
 - AP password
 - Admin token (untuk autentikasi aksi manajemen)
 - New admin token (opsional untuk mengganti token lama)
+- Catatan: perubahan password AP dan token admin valid jika panjang 8-63 karakter.
 
 Tombol:
 - **SAVE SETTINGS** -> simpan ke NVS (Preferences)

@@ -342,7 +342,11 @@ void initWiFiAP() {
 void applyAccessPointConfig() {
   WiFi.softAPdisconnect(true);
   WiFi.softAPConfig(apIP, apGateway, apSubnet);
-  WiFi.softAP(AP_SSID, apPassword.c_str());
+  if (apPassword.length() == 0) {
+    WiFi.softAP(AP_SSID);
+  } else {
+    WiFi.softAP(AP_SSID, apPassword.c_str());
+  }
 }
 
 void initWebServer() {
@@ -549,7 +553,11 @@ void validateSensors() {
   if (!adxl.healthy) {
     sysData.rollDiff = 0.0f;
     sysData.pitchDiff = 0.0f;
-    sysData.state = (tiltState == STATE_DANGER) ? STATE_DANGER : STATE_SENSOR_WARNING;
+    if (tiltState == STATE_DANGER || tiltState == STATE_WARNING) {
+      sysData.state = tiltState;
+    } else {
+      sysData.state = STATE_SENSOR_WARNING;
+    }
     return;
   }
 
@@ -695,8 +703,9 @@ void updateTFT(bool force) {
 
   String s = sysData.calibrating ? "CALIBRATING" : statusText(sysData.state);
   if (force || pStatus != s || pCal != sysData.calibrating) {
+    uint16_t color = sysData.calibrating ? ILI9341_CYAN : statusColor(sysData.state);
     tft->fillRect(60, 134, 250, 10, ILI9341_BLACK);
-    tft->setTextColor(statusColor(sysData.state));
+    tft->setTextColor(color);
     tft->setCursor(60, 134);
     tft->print(s);
     pStatus = s;
