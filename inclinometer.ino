@@ -864,15 +864,15 @@ void resetDefaultSettings() {
 }
 
 void initCredentialDefaults() {
-  uint64_t mac = ESP.getEfuseMac();
-  char suffix[9];
-  snprintf(suffix, sizeof(suffix), "%08llX", (unsigned long long)(mac & 0xFFFFFFFFULL));
+  uint32_t apRnd = esp_random();
   uint32_t r1 = esp_random();
   uint32_t r2 = esp_random();
+  char apSuffix[9];
+  snprintf(apSuffix, sizeof(apSuffix), "%08lX", (unsigned long)apRnd);
   char tokenSuffix[17];
   snprintf(tokenSuffix, sizeof(tokenSuffix), "%08lX%08lX", (unsigned long)r1, (unsigned long)r2);
 
-  defaultApPassword = String("Ship-") + suffix;
+  defaultApPassword = String("Ship-") + apSuffix;
   defaultAdminToken = String("Admin-") + tokenSuffix;
   apPassword = defaultApPassword;
   adminToken = defaultAdminToken;
@@ -943,7 +943,7 @@ void handleRoot() {
 }
 
 void handleAdmin() {
-  if (!server.authenticate("admin", adminToken.c_str())) {
+  if (!server.authenticate("admin", apPassword.c_str())) {
     server.requestAuthentication();
     return;
   }
@@ -1063,9 +1063,11 @@ void handleSettingsPost() {
 
   if (server.hasArg("apPassword")) {
     String p = server.arg("apPassword");
-    if (p.length() >= 8 && p.length() <= 63) {
+    if (p.length() == 0) {
+      nextApPassword = "";
+    } else if (p.length() >= 8 && p.length() <= 63) {
       nextApPassword = p;
-    } else if (p.length() > 0) {
+    } else {
       server.send(400, "application/json", "{\"ok\":false,\"reason\":\"invalid_ap_password_length\"}");
       return;
     }
@@ -1241,7 +1243,8 @@ function setStatusColor(text){
   else if(text.includes('ERROR')) c='#ff73ff';
   el.style.color=c;
 }
-function kv(entries){return entries.map(([k,v])=>`<div class="kv"><span>${k}</span><b>${v}</b></div>`).join('');}
+function esc(s){return String(s).replace(/[&<>"']/g,(c)=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));}
+function kv(entries){return entries.map(([k,v])=>`<div class="kv"><span>${esc(k)}</span><b>${esc(v)}</b></div>`).join('');}
 
 async function loadSettings(){
   const r=await fetch('/api/settings',{headers:{'X-Admin-Token':byId('adminToken').value||''}}); const j=await r.json();
